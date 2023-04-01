@@ -1,0 +1,7385 @@
+---
+title: "ns_3Species"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+# setup
+```{r}
+
+library(devtools)
+library(ggplot2)
+library(tidyverse)
+library(moments)
+library(mapplots)
+library(knitr)
+library(gridExtra)
+library(rfishbase)
+library(broom)
+library(purrr)
+library(corrplot)
+library(openxlsx)
+library(dplyr)
+library(RColorBrewer)
+library(lme4)
+library(lmerTest)
+library(nlme)
+library(astsa)
+library(car)
+library(MuMIn)
+library(leaps)
+library(viridis)
+library(DHARMa)
+library(sjPlot)
+library(maps)
+
+
+```
+
+
+# Read data 
+```{r}
+
+# Read data: SWC_stn
+swc.stn<-read.csv("a0_ices_raw_data/SWC_stn.csv")
+swc.stn$Region <-"Scottish West Coast"
+
+# Read data: NS_stn_1965_2000, NS_stn_2001_2020
+ns.stn.1<-read.csv("a0_ices_raw_data/NS_stn_1965_2000.csv")
+ns.stn.2<-read.csv("a0_ices_raw_data/NS_stn_2001_2020.csv")
+ns.stn.1$Region <- "North Sea"
+ns.stn.2$Region <- "North Sea"
+
+ns.stn <- bind_rows(ns.stn.1, ns.stn.2)
+
+# dd.stn has all data
+dd.stn <-bind_rows(swc.stn,ns.stn.1,ns.stn.2)
+
+dd.stn %>% 
+  group_by(Region,Species) %>% 
+  tally()
+
+
+```
+
+# Clean data and rename 
+```{r}
+
+#---------Remove unnessary columns----------------------------
+dd.stn <- dd.stn %>%
+  select(-c(Survey,Area,AphiaID,DateofCalculation))
+
+
+#---------Remove LngtClass = 0 --------------------------------
+# Because CPUE of LngtClass = 0 is always 0
+dd.stn <- dd.stn %>%
+  filter(LngtClass > 0) 
+
+# Check max and min length 
+dd.stn %>%
+  group_by(Species, Region) %>%
+  summarise(max_length = max(LngtClass),
+            min_length = min(LngtClass))
+
+#--------Remove subareas with 0 CPUE----------------------
+# Updated 200701 to remove raw CPUE_number_per_hour with 0
+# So to remove all subarea with 0 CPUE for each length and time point
+
+dd.stn <- dd.stn %>%
+  filter(CPUE_number_per_hour > 0) 
+
+#-----------Keep all Quarters at this moment.
+dd.stn %>%
+  group_by(Region) %>% 
+  count(Year,Quarter)
+
+
+#-------------rename species to common names----------------
+dd.stn <- dd.stn %>% rename(Scientific_Name = Species )
+
+dd.stn <- dd.stn %>% 
+    mutate(Species = case_when
+           ( Scientific_Name == "Clupea harengus" ~ 'Atlantic herring',
+             Scientific_Name == "Gadus morhua" ~ 'Atlantic cod',
+             Scientific_Name == "Melanogrammus aeglefinus" ~ 'Haddock',
+             Scientific_Name == "Merlangius merlangus" ~ 'Whiting',
+             Scientific_Name == "Pleuronectes platessa" ~ 'Plaice',
+             Scientific_Name == "Pollachius virens" ~ 'Saithe',
+             Scientific_Name == "Scomber scombrus" ~ 'Atlantic mackerel',
+             Scientific_Name == "Sprattus sprattus" ~ 'Sprat',
+             Scientific_Name == "Trisopterus esmarkii" ~ 'Norway pout'
+             ))
+
+
+dd.stn$Species <- fct_relevel(dd.stn$Species, 
+                       c('Atlantic cod', 'Haddock', 'Whiting',
+                         'Saithe','Atlantic mackerel','Norway pout',
+                         'Atlantic herring', 'Plaice', 'Sprat'))    
+
+#--------------Add YearQua-------------------------
+dd.stn <- dd.stn %>%
+  mutate(YearQua=paste(Year,Quarter,sep=".")) 
+
+```  
+  
+ 
+  
+# Remove quantiles
+```{r}
+
+# Remove individuals below 5% and above 80% quantile of length range
+## Note: already remove LngtClass=0 in previous chunk.
+dd.stn <- dd.stn %>% 
+  group_by(Species, Region) %>% 
+  mutate(Lower_limit = min(LngtClass) + 
+           (0.05 * (max(LngtClass)-min(LngtClass))),
+         Upper_limit= min(LngtClass + 
+            (0.80 * (max(LngtClass)-min(LngtClass))))) %>% 
+  filter(LngtClass > Lower_limit & LngtClass < Upper_limit) 
+ 
+
+
+
+```
+
+
+  
+# Filter to 3 species of the North Sea  
+```{r}
+
+dd.stn <- dd.stn %>%
+  filter(Region == "North Sea" & Species %in% c("Atlantic cod","Haddock", "Whiting"))
+
+```
+  
+
+# Select between year 1977-2019
+```{r}
+dd.stn <- dd.stn %>% 
+  filter(Year >=1977 & Year < 2020)
+
+```
+  
+# Select only Q1
+```{r}
+
+dd.stn <- dd.stn %>% 
+  filter(Quarter == "1")
+
+dd.stn %>% 
+  group_by(Year,Quarter) %>% 
+  tally()
+
+```  
+  
+
+  
+
+  
+# Make a summary table  
+```{r, fig.width=20} 
+
+
+# Summarize data after all the filtering
+(table <- dd.stn %>%
+    group_by(Region, Species) %>%
+    summarise(# Number of SubAreas
+              Number_Subarea_Home_range = n_distinct(SubArea),
+              # Time series length
+              Num_TimePoint = n_distinct(YearQua),
+              Start_year = min(Year),
+              End_year = max(Year)))
+
+```
+
+
+# Plot theme
+```{r}
+theme <- 
+  theme_bw()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), 
+    axis.line=element_line(colour = "black"),
+    #axis.text.x=element_blank(),
+    #axis.ticks.x=element_blank(),
+    legend.position="none")
+
+```
+
+
+
+#----------------------------------------------
+
+# Create cpue.lngt.subarea.yearqua
+
+```{r}
+
+# Create cpue.lngt.subarea.yearqua
+
+cpue.lngt.subarea.yearqua <-
+  dd.stn %>%
+  group_by(Region,Species,YearQua,SubArea,LngtClass) %>%
+  summarise(CPUE_Lngt_SubArea_YearQua = sum(CPUE_number_per_hour),
+            .groups = "drop") %>%
+  group_by(Region,Species, YearQua, SubArea) %>% 
+  mutate(CPUE_All_Lngt_SubArea_Yearqua = sum(CPUE_Lngt_SubArea_YearQua))
+
+```
+
+
+# Create cpue.lngt.yearqua
+
+```{r }
+cpue.lngt.yearqua <-
+  dd.stn %>%
+  group_by(Region,Species,YearQua,LngtClass) %>%
+  summarise(CPUE_Lngt_YearQua = sum(CPUE_number_per_hour),
+            .groups = "drop") %>% 
+  # Add CPUE_All_Lngt_Yearqua 
+  group_by(Region, Species, YearQua) %>% 
+  mutate(CPUE_All_Lngt_Yearqua = sum(CPUE_Lngt_YearQua)) %>% 
+  mutate(Denstiy_CPUE_Lngt_Yearqua = 
+           CPUE_Lngt_YearQua/CPUE_All_Lngt_Yearqua)
+
+
+```
+
+# Create cpue.length.subarea.yearqua & cpue.subarea.yearqua
+```{r }
+
+cpue.length.subarea.yearqua <-dd.stn %>% 
+  group_by(Region, Species) %>%
+  # (Original length class - min class)/ (length range/10)
+  mutate(Length=(LngtClass-min(LngtClass)) %/% ((max(LngtClass)-min(LngtClass))/20)) %>%
+  filter (Length < 20) %>%
+  # Add cpue of all LngtClasses that belong to each Length
+  group_by(Region,Species,YearQua,SubArea,Length) %>% 
+  summarize(CPUE_Length_Subarea_Yearqua=sum(CPUE_number_per_hour))  
+
+cpue.subarea.yearqua <-cpue.length.subarea.yearqua %>%
+  group_by(Region, Species, YearQua, SubArea) %>%
+  summarize(CPUE_All_Length_Subarea_Yearqua = sum(CPUE_Length_Subarea_Yearqua))
+
+
+# Add CPUE_All_Length_Subarea_Yearqua to tibble cpue.length.subarea.yearqua
+cpue.length.subarea.yearqua<-cpue.length.subarea.yearqua %>%
+  left_join(cpue.subarea.yearqua,by=c("Region","Species", "YearQua", "SubArea"))
+
+# Check how many ind in each Length
+cpue.length.subarea.yearqua %>% 
+  group_by(Region,Species, Length) %>% 
+  tally()
+
+```
+
+
+# summary of body size bin
+```{r}
+
+dd.stn %>% 
+  group_by(Region, Species) %>%
+  # (Original length class - min class)/ (length range/10)
+  summarise(range = max(LngtClass)-min(LngtClass),
+            interval= range/20)
+
+```
+
+
+# Length at maturity
+
+```{r eval=FALSE}
+
+# Haddock, whiting, cod (Use webplotDigitizer to extract)
+# https://www.sciencedirect.com/science/article/pii/S0165783615001459
+
+# female: recorded by hand
+had_f <- c(27.3,25.2,26.6,26.9,23.4,17.1,19.2,20.6,16.0, 15.3, 19.2, 19.5, 20.2, 21.2, 23)
+whi_f <- c(25.3,23.5,24.6,21.0,23.8,23.0,22.0,23.7,23.3,19.4,20.9,23.0,21.1,22.6,21.1,20.8,18.6,19.7,22.2,21.1,23.6)
+cod_f <- c(60.3,54.7,53.4,53.5,47.2,47.2,44.5,41.7,45.3,39.0)
+
+mean(had_f) # 21.38
+mean(whi_f) # 22.11
+mean(cod_f) # 48.68
+
+# male: recorded in L50_had_m, L50_whi_m
+had_m <-read.csv("Life_History/L50_had_m.csv")
+colMeans(had_m)[2] # 20.56
+whi_m <-read.csv("Life_History/L50_whi_m.csv")
+colMeans(whi_m)[2] # 21.28
+L
+# Average male and female
+had_avg <- (21.38+20.56)/2 # 20.97
+whi_avg <-(22.11+21.28)/2 #21.70
+
+# Info from fishbase
+maturity("Pollachius virens")
+library(rfishbase)
+
+
+# Mark length at maturity
+check.maturity.class <-
+  function(species, maturity) {
+    range <- swc.stn %>% 
+      group_by(Species) %>% 
+      summarise(Min_Length = min(LngtClass),
+                Max_Length = max(LngtClass)) %>% 
+      filter (Species == species) 
+    
+    (maturity - range[2]) %/% ((range[3]-range[2])/10)
+
+  }
+
+check.maturity.class("Atlantic cod", 455 ) #3 
+check.maturity.class("Haddock",335) #3
+check.maturity.class("Whiting",217) #3
+check.maturity.class("Saithe",554) #3
+check.maturity.class("Atlantic mackerel",262) #3
+check.maturity.class("Norway pout",124) #3
+
+```
+
+
+# Create cpue.length.year & cpue.year
+```{r }
+
+cpue.length.year <- cpue.length.subarea.yearqua %>%
+  group_by(Region, Species,YearQua,Length) %>%
+  summarize(CPUE_Length_Year=sum(CPUE_Length_Subarea_Yearqua)) 
+
+# Sum of all CPUE per species (sum all length) per YearQua
+cpue.year <- cpue.length.year %>%
+  group_by(Region, YearQua, Species) %>%
+  summarize(CPUE_Year = sum(CPUE_Length_Year)) 
+
+
+#--------------------------------------------
+# Compute Prop_CPUE_Length_Year
+
+# 1 Add CPUE_Year to tibble cpue.length.year
+cpue.length.year<-cpue.length.year %>%
+  left_join(cpue.year,by=c("Region","YearQua","Species"))
+
+# 2 Compute Prop_CPUE_Length_Year in cpue.length.year
+cpue.length.year <- cpue.length.year %>% 
+  mutate(Prop_CPUE_Length_Year = CPUE_Length_Year / CPUE_Year)
+
+#----------------------------------------
+# Create log_CPUE_Year in cpue.year
+cpue.year <- cpue.year %>% 
+  mutate(log_CPUE_Year = log(CPUE_Year))
+
+#---------------------------------------
+
+# Create scaleed log_CPUE_Year in cpue.length.year
+
+# 1 scale function
+scale_this <- function(x){
+  (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+}
+
+# 2 Scale
+cpue.length.year <- cpue.length.year %>% 
+  group_by(Region,Species,Length) %>%
+  mutate(CPUE_Length_Year_scale_log=
+           scale_this(log(CPUE_Length_Year)))
+
+```
+
+
+
+
+# Compute length richness, shannon & mean age over time and incorporate to cpue.year
+```{r}
+
+# Compute size index over year from 10 Length classes 
+size.index.year <- cpue.length.year %>%
+  mutate(p=CPUE_Length_Year/CPUE_Year) %>%
+  group_by(Region, Species, YearQua) %>%
+  summarize(Shannon_10Length = sum(-p*log(p), na.rm=T),
+            Mean_age_10Length = sum(Length*CPUE_Length_Year)/sum(CPUE_Length_Year)) 
+
+# Compute size index from raw Lngt class
+size.index.year.Lngt <-cpue.lngt.yearqua %>%
+  mutate(p=CPUE_Lngt_YearQua/CPUE_All_Lngt_Yearqua) %>%
+  group_by(Region, Species, YearQua) %>%
+  summarize(Shannon_RawLngt = sum(-p*log(p), na.rm=T),
+            Richness_size_RawLngt = n_distinct(LngtClass),
+            Mean_age_RawLngt = sum(LngtClass*CPUE_Lngt_YearQua)/sum(CPUE_Lngt_YearQua)) 
+
+# Incorporate above to cpue.year
+cpue.year <- full_join(cpue.year,size.index.year,
+                       by=c("Region", "Species", "YearQua"))
+
+cpue.year <- full_join(cpue.year,size.index.year.Lngt,
+                       by = c("Region", "Species", "YearQua"))
+
+```  
+
+
+# Compute home range and incorporate to cpue.year
+```{r}
+
+home.range.year <- cpue.subarea.yearqua %>%
+  group_by(Region, Species, YearQua) %>%
+  # use n_distinct(SubArea) to count the number of SubAreas
+  summarise(Number_Subarea_All_Length=n_distinct(SubArea))
+
+# incorporate to cpue.year
+cpue.year <- full_join(cpue.year,home.range.year ,
+                       by = c("Region", "Species", "YearQua"))
+
+```
+
+# Compute Num_SubArea and add to cpue.length.year
+```{r}
+
+# Compute Num_SubArea_Length, add to cpue.length.year
+num.subarea.length <- cpue.length.subarea.yearqua %>%
+  group_by(Region, Species, YearQua, Length) %>%
+  summarise(Num_SubArea_Length = n_distinct(SubArea)) 
+
+cpue.length.year <- 
+  left_join(cpue.length.year, num.subarea.length, 
+            by = c("Region","Species", "YearQua","Length"))
+
+
+# add Number_SubArea_All_Length from home.range.year to cpue.length.year
+cpue.length.year <- 
+  left_join(cpue.length.year, home.range.year, 
+            by = c("Region", "Species", "YearQua"))
+ 
+ 
+# Compute proportion of Num_SubArea over Num_SubArea_All_Length
+cpue.length.year <- cpue.length.year %>% 
+  mutate(Prop_SubArea_Length = Num_SubArea_Length / Number_Subarea_All_Length) %>% 
+  ungroup(Length) %>% 
+  mutate(Length = factor(
+    Length, levels=c("0","1","2","3","4",
+                     "5","6","7","8","9",
+                     "10","11","12","13","14","15",
+                     "16","17","18","19")))
+
+```
+
+# Compute Mean_Prop_SubArea and add to cpue.year
+```{r}
+# Compute Mean_Prop_Subarea
+cpue.length.year.mean <-
+  cpue.length.year %>% 
+  group_by(Region,Species,YearQua) %>% 
+  summarise(Mean_Prop_SubArea = mean(Prop_SubArea_Length),
+            new = list(mean_se(Prop_SubArea_Length))) %>%
+  unnest(new)
+
+
+cpue.length.year.mean <-
+  cpue.length.year.mean %>% 
+  select(-y) %>% 
+  rename(Min_Prop_SubArea = ymin,
+         Max_Prop_SubArea = ymax)
+  
+  
+cpue.year <- 
+  left_join(cpue.year, cpue.length.year.mean, 
+            by = c("Region","Species", "YearQua"))
+
+```
+
+
+# Compute standardized subarea from maximum range of the corresponding size group
+
+```{r}
+
+# 1 extract maximum range of size group over time then add to cpue.length.year
+
+max.subarea.length <- num.subarea.length %>% 
+  group_by(Region, Species, Length) %>% 
+  summarise(Max_SubArea_Length = max (Num_SubArea_Length)) %>% 
+  mutate_at("Length", as.factor)
+
+cpue.length.year <- 
+  left_join(cpue.length.year, max.subarea.length, 
+            by = c("Region","Species", "Length"))
+
+  
+# 2 Compute standardized subarea length 
+cpue.length.year <- cpue.length.year %>% 
+  group_by(Region, Species, YearQua, Length) %>% 
+  mutate(Stan_SubArea_Length = 
+           Num_SubArea_Length / Max_SubArea_Length)
+
+
+# 3 Compute mean standardized subarea and add to cpue.year
+Stan_Subarea <- cpue.length.year %>% 
+  group_by(Region, Species, YearQua) %>% 
+  summarise(Mean_Stan_SubArea = mean(Stan_SubArea_Length))
+
+cpue.year <- 
+  left_join(cpue.year, Stan_Subarea, 
+            by = c("Region","Species","YearQua"))
+
+```
+
+# Modify-Compute pairwise habitat overlap (average.out)
+
+```{r }
+
+# All 190 combinations 
+#combn(0:19,2)
+
+out <- vector(mode = "list")
+
+for (i in 1:190){
+  # select two length from 45 combinations
+  x <- combn(0:19, 2)[,i][1] 
+  y <- combn(0:19, 2)[,i][2]
+  
+  # Subarea of length group x
+  cpue.x <- cpue.length.subarea.yearqua %>%
+  group_by(Region,Species,YearQua) %>%
+  filter(Length==x & CPUE_Length_Subarea_Yearqua>0) %>%
+  dplyr::select(Region, Species, SubArea,YearQua)
+  
+  # Subarea of length group y
+  cpue.y <- cpue.length.subarea.yearqua %>%
+  group_by(Region,Species,YearQua) %>%
+  filter(Length==y & CPUE_Length_Subarea_Yearqua>0) %>%
+  dplyr::select(Region, Species, SubArea,YearQua)
+  
+  # intersect (#@ add .groups to eliminate warning )
+  intersect <- 
+  dplyr::intersect(cpue.x, cpue.y) %>%
+  group_by (Region, Species, YearQua) %>%
+  summarise(Number_intersect=n_distinct(SubArea),
+            .groups = "drop")
+  
+  # union (#@ add .groups to eliminate warning )
+  union <- 
+  dplyr::union(cpue.x, cpue.y) %>%
+  group_by (Region, Species,YearQua) %>%
+  summarise(Number_union=n_distinct(SubArea),
+            .groups = "drop")
+
+  # overlap
+  overlap <- 
+    full_join(intersect,union,
+              by=c("Region","Species", "YearQua")) %>%
+    replace_na(list(Number_intersect = 0)) %>%
+    mutate(Area_overlap = Number_intersect / Number_union) 
+
+  # Add x and y column (pair length)
+  overlap <- overlap %>% add_column(x, y)
+  
+  # store in List
+  out[[i]] <- overlap
+  
+}
+
+out.all<-bind_rows(out,.id = "id") # id is combination of pairs
+
+out.all.overlap <-out.all
+
+# Calculate average area overlap among all combinations
+average_out<-out.all %>%
+  group_by(Region, Species,YearQua) %>%
+  summarize(Mean_intersect = mean(Number_intersect),
+            Mean_union = mean(Number_union),
+            Paired_habitat_overlap = mean(Area_overlap, na.rm = T),
+            # use mean_se() to create mean, min, and max area_overlap
+            new = list(mean_se(Area_overlap)),
+            .groups = "drop") %>%
+  unnest(new) 
+
+# incorporate average.out with cpue.yearqua
+average_out_arranged <- average_out %>% 
+  # remove y from new as is same as Mean_Area_Overlap
+  select(-y) %>%  
+  rename(Min_Paired_habitat_overlap = ymin,
+         Max_Paired_habitat_overlap = ymax)
+  
+  cpue.year <- full_join(cpue.year,average_out_arranged, 
+                       by = c("Region", "Species","YearQua"))
+
+out.all %>% group_by(Species,YearQua) %>% 
+  summarise(number_of_id = n_distinct(id))
+  
+
+```
+
+
+
+# Compute habitat overlap using habitat area of one class as demoninator
+```{r }
+
+# Total 190 combinations
+# combn(0:19,2)
+
+out_deno <- vector(mode = "list")
+
+for (i in 1:190){
+  # select two length from 45 combinations
+  x <- combn(0:19, 2)[,i][1] 
+  y <- combn(0:19, 2)[,i][2]
+  
+  # Subarea of length group x
+  cpue.x <- cpue.length.subarea.yearqua %>%
+  group_by(Species,YearQua) %>%
+  filter(Length==x & CPUE_Length_Subarea_Yearqua>0) %>%
+  dplyr::select(Region, Species, SubArea,YearQua)
+  
+  # Subarea of length group y
+  cpue.y <- cpue.length.subarea.yearqua %>%
+  group_by(Species,YearQua) %>%
+  filter(Length==y & CPUE_Length_Subarea_Yearqua>0) %>%
+  dplyr::select(Region, Species, SubArea,YearQua)
+  
+  # intersect
+  intersect <- 
+  dplyr::intersect(cpue.x, cpue.y) %>%
+  group_by (Region, Species, YearQua) %>%
+  summarise(Number_intersect=n_distinct(SubArea),
+             .groups = "drop")
+  
+  # denominator_x
+  deno_x <- cpue.x %>% 
+  group_by (Region, Species,YearQua) %>%
+  summarise(Number_x = n_distinct(SubArea),
+             .groups = "drop")
+
+  # demoninator_y
+  deno_y <- cpue.y %>% 
+    group_by (Region, Species, YearQua) %>% 
+    summarise(Number_y = n_distinct(SubArea),
+               .groups = "drop")
+  
+  # join deno_x and deno_y
+  deno <- full_join(deno_x, deno_y,
+                    by = c("Region","Species", "YearQua"))
+  
+  # overlap_size_deno
+  overlap_size_deno <- 
+    full_join(intersect, deno,  
+              by=c("Region","Species", "YearQua")) %>%
+    replace_na(list(Number_intersect = 0)) %>%
+    mutate(Area_overlap_deno_x = Number_intersect / Number_x,
+           Area_overlap_deno_y = Number_intersect / Number_y) 
+
+  # Add x and y column (pair length)
+  overlap_size_deno <- overlap_size_deno %>% add_column(x, y)
+  
+  # store in List
+  out_deno[[i]] <- overlap_size_deno
+  
+}
+
+# bind lists by rows
+out_deno_all<-bind_rows(out_deno,.id = "id") # id is combination of pairs
+
+# create mean of Area_overlap_deno_x and Area_overlap_deno_y
+out_deno_all <- out_deno_all %>% 
+  mutate(Mean_Area_overlap_deno_xy = 
+              1/2*(Area_overlap_deno_x + Area_overlap_deno_y))
+
+
+# Calculate average area overlap among 190 combinations
+average_out_deno_out <- out_deno_all %>%
+  group_by(Region, Species,YearQua) %>%
+  # use mean_se() to create mean, min, and max area_overlap
+  summarize(Paired_habitat_overlap_deno = 
+              mean(Mean_Area_overlap_deno_xy, na.rm = T),
+            new = list(mean_se(Mean_Area_overlap_deno_xy)),
+             .groups = "drop") %>%
+  unnest(new) 
+
+
+# incorporate average_out_deno_out with cpue.yearqua
+average_out_deno_out <- average_out_deno_out %>% 
+  # remove y from new as is same as Mean_Area_Overlap_deno
+  select(-y) %>%  
+  rename(Min_Paired_habitat_overlap_deno = ymin,
+         Max_Paired_habitat_overlap_deno = ymax)
+  
+  
+cpue.year <- full_join(cpue.year,average_out_deno_out, 
+                       by = c("Region", "Species","YearQua"))
+
+```
+
+
+
+# Calculate lat lon centroid 
+
+```{r}
+
+# Add lon, lat
+cpue.length.subarea.yearqua.geo <- 
+  cpue.length.subarea.yearqua %>% 
+  mutate(lon = ices.rect(SubArea)$lon,
+         lat = ices.rect(SubArea)$lat)
+
+# calculate CPUE-weighted mean lon and lat for each length
+cpue.length.subarea.yearqua.geo.mean <-
+  cpue.length.subarea.yearqua.geo %>% 
+  group_by(Region, Species, YearQua,Length) %>% 
+  summarise(
+    Centroid_lon = sum(CPUE_Length_Subarea_Yearqua * lon)/
+      sum(CPUE_Length_Subarea_Yearqua),
+    Centroid_lat = sum(CPUE_Length_Subarea_Yearqua * lat)/
+      sum(CPUE_Length_Subarea_Yearqua)) %>%
+  ungroup() %>% 
+  mutate_at('Length',as.factor)
+  
+
+# Add to cpue.length.yearqua
+cpue.length.year <- 
+  full_join(cpue.length.year,
+            cpue.length.subarea.yearqua.geo.mean,
+            by=c("Region", "Species", "YearQua","Length"))  
+
+
+```
+
+
+# Compute pairwise distance in centroid
+
+```{r}
+
+# All 190 pair combinations
+
+# combn(0:19,2)
+
+out_centroid <- vector(mode = "list")
+
+for (i in 1:190){
+  # select two length from 45 combinations
+  x <- combn(0:19, 2)[,i][1] 
+  y <- combn(0:19, 2)[,i][2]
+  
+  # subset of length group x
+  lon.lat.x <- cpue.length.year %>%
+    group_by(Region,Species,YearQua) %>%
+    filter(Length == x) %>% 
+    dplyr::select(Region, Species, Length,YearQua, 
+                  Centroid_lon, Centroid_lat)
+  
+  # subset of length group y
+  lon.lat.y <- cpue.length.year %>%
+    group_by(Region,Species,YearQua) %>%
+    filter(Length == y) %>% 
+    dplyr::select(Region, Species, Length,YearQua, 
+                  Centroid_lon, Centroid_lat)
+  
+  # join x and y
+  lon.lat.xy <- 
+    full_join(lon.lat.x, lon.lat.y,
+              by=c("Region","Species", 
+                   "YearQua"))
+
+  # Absoluate distance between centroids
+  lon.lat.xy <- lon.lat.xy %>% 
+    mutate(Distance_lon = abs(Centroid_lon.x - Centroid_lon.y),
+           Distance_lat = abs(Centroid_lat.x - Centroid_lat.y)) 
+
+  # Add x and y column (pair length)
+  lon.lat.xy <- lon.lat.xy %>% add_column(x, y)
+  
+  # store in List
+  out_centroid[[i]] <- lon.lat.xy
+  
+}
+
+
+out_centroid_all<-bind_rows(out_centroid,.id = "id") # id is combination of pairs
+
+
+# Calculate average area overlap among 45 combinations
+average_out_centroid <- out_centroid_all %>%
+  group_by (Region, Species,YearQua) %>%
+  summarize(new = list(mean_se(Distance_lon)),
+            new1 = list(mean_se(Distance_lat))) %>%
+  unnest(new) %>% 
+  rename(Mean_paired_lon_distance = y,# delete this later
+         Min_paired_lon_distance = ymin,
+         Max_paired_lon_distance = ymax) %>% 
+  unnest(new1) %>% 
+    rename(Mean_paired_lat_distance = y,# delete this later
+         Min_paired_lat_distance = ymin,
+         Max_paired_lat_distance = ymax) 
+    
+
+# incorporate average_out_centroid with cpue.year
+  
+cpue.year <- full_join(cpue.year,average_out_centroid, 
+                       by = c("Region", "Species","YearQua"))
+
+
+
+```
+
+# Create cpue.pair for model purpose
+```{r}
+
+# retain useful variables for 3 tibbles
+out.all.overlap <- out.all.overlap %>% 
+  select(- Number_intersect, - Number_union)
+  
+out_deno_all <- out_deno_all %>% 
+  select(- Area_overlap_deno_x, - Area_overlap_deno_y,
+         - Number_intersect, - Number_x, - Number_y,
+         )
+  
+out_centroid_all <- out_centroid_all %>% 
+  select(id,Region,Species,YearQua,Distance_lon,
+         Distance_lat,x, y)
+
+# bind 3 tibbles
+out_temp <- left_join(out.all.overlap,out_deno_all,
+          by = c ("id","Region","Species","YearQua",
+                  "x","y"))
+
+cpue.pair <- left_join(out_temp, out_centroid_all,
+          by = c ("id","Region","Species","YearQua",
+                  "x","y"))
+
+# select variables
+cpue.pair <- cpue.pair %>% 
+  rename(Pair_id = id) 
+
+```
+
+
+# Rename cpue.year  variables
+```{r}
+
+cpue.year <- cpue.year %>% 
+  rename(Regional_Shannon = Shannon_RawLngt,
+         Regional_size_richness = Richness_size_RawLngt,
+         Regional_mean_size= Mean_age_RawLngt)
+
+```
+
+
+# Add time index basd on North Sea 3 species survey year 1977-2019
+Replace YearQua to TimeIndex, add Year & Quarter to tibbles
+```{r}
+
+# Add Year, Quarter to all tibbles
+cpue.lngt.yearqua <- cpue.lngt.yearqua %>% 
+  separate(YearQua, c("Year", "Quarter"), remove =F) %>% 
+  mutate_at("Year", as.numeric) %>% 
+  mutate_at("Quarter",as.numeric)
+
+cpue.length.subarea.yearqua <- cpue.length.subarea.yearqua %>% 
+  separate(YearQua, c("Year", "Quarter"), remove =F) %>% 
+  mutate_at("Year", as.numeric) %>% 
+  mutate_at("Quarter",as.numeric)
+
+cpue.length.year<- cpue.length.year %>% 
+   separate(YearQua, c("Year", "Quarter"), remove =F) %>% 
+  mutate_at("Year", as.numeric) %>% 
+  mutate_at("Quarter",as.numeric)
+
+cpue.year <-cpue.year %>% 
+  separate(YearQua, c("Year", "Quarter"), remove =F) %>% 
+  mutate_at("Year", as.numeric) %>% 
+  mutate_at("Quarter",as.numeric)
+  
+cpue.pair <- cpue.pair %>% 
+  separate(YearQua, c("Year", "Quarter"), remove =F) %>% 
+  mutate_at("Year", as.numeric) %>% 
+  mutate_at("Quarter",as.numeric)
+  
+``` 
+
+
+# Add fishing mortality & TSB 
+
+```{r}
+
+FishingM <-read.csv("a0_ices_raw_data/Fishing_Mortality.csv")
+
+FishingM <- FishingM %>% 
+  mutate_at("Species", as.factor) %>% 
+  mutate_at("Year", as.numeric) %>% 
+  mutate_at("TSB_Tonnes", as.numeric)
+
+cpue.year <- left_join(cpue.year, FishingM, by = c("Year", "Species"))
+
+cpue.length.year <- left_join(cpue.length.year, FishingM, by = c("Year", "Species"))
+
+cpue.pair <- left_join(cpue.pair,FishingM, by = c("Year","Species"))
+
+# For some reasons, transfering species in FishingM from character to factor create different levels with cpue.year, cpue.length.year, and cpue.pair. So that the Species column for the three tibbles is converted to character. I transform back to factor for these three tibbles.
+
+cpue.year <- cpue.year %>% 
+  ungroup() %>% 
+  mutate_at("Species", as.factor)
+
+cpue.length.year <- cpue.length.year %>% 
+  ungroup() %>% 
+  mutate_at("Species", as.factor)
+
+cpue.pair <- cpue.pair %>% 
+  ungroup() %>% 
+  mutate_at("Species", as.factor)
+
+```
+
+
+# Add temperature (from self-compiled from ICES)
+Variable name: MeanBT,CVofBT
+```{r}
+
+# Read self compiled bottomT data 1977-2019
+Temp_NS<-read.csv("a0_ices_raw_data/bottomT_NS_1977_2019.csv")
+
+# Add to cpue.length.year
+cpue.length.year <- left_join(cpue.length.year, Temp_NS,
+          by=c("Year","Quarter"))
+
+# Add to cpue.year
+cpue.year <- left_join(cpue.year, Temp_NS,
+          by=c("Year","Quarter"))
+
+# Add to cpue.pair
+cpue.pair <- left_join(cpue.pair,Temp_NS,
+                                  by = c("Year","Quarter"))
+
+```
+
+# Standardize (scale) variables
+scale of log (CPUE_Length_Year) is in line 333 by group.
+#@ 2021.11.18 Change year scale
+
+```{r}
+scale_this <- function(x){
+  (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+}
+
+# Create Year.scale as centered year
+Year.scale <-  tibble(Year = seq(1977,2019,1))
+Year.scale <-  Year.scale %>% mutate(Year_scale_centered=scale_this(Year))
+
+#1 cpue.year
+cpue.year <- cpue.year %>% 
+  mutate(MeanBT_scale = scale_this(MeanBT)) %>% 
+  mutate(TSB_Tonnes_scale = scale_this(TSB_Tonnes))
+  #@ supressed below 2021.11.18
+  #mutate(Year_scale = scale_this(Year))
+
+#@ added 2021.11.18
+cpue.year <- left_join(cpue.year,Year.scale,
+                       by = "Year")
+
+#2 cpue.pair
+cpue.pair <- cpue.pair %>% 
+  mutate(MeanBT_scale = scale_this(MeanBT)) %>% 
+  mutate(TSB_Tonnes_scale = scale_this(TSB_Tonnes))
+  #@ supressed below 2021.11.18
+  #mutate(Year_scale = scale_this(Year))
+
+#@ added 2021.11.18
+cpue.pair <- left_join(cpue.pair,Year.scale,
+                       by = "Year")
+
+#3 cpue.length.year
+cpue.length.year <- left_join(cpue.length.year,Year.scale,
+                              by = "Year")
+
+```
+
+
+#---------Save as RData
+When changing length number:
+1. in Create cpue.length.subarea.yearqua, change to 10/15/20
+2. in Modify-compute pairwise habitat overlap, change to 
+190/105/45, 0:19, 0:14, 0:9
+3. in Compute habitat overlap using habitat, change to 
+190/105/45, 0:19, 0:14, 0:9
+Note: not yet run cpue.lngt.subarea.yearqua. Need to run and save RData again.
+```{r}
+
+# 10 Length
+save(cpue.lngt.subarea.yearqua, cpue.lngt.yearqua, cpue.length.subarea.yearqua, cpue.length.year, cpue.year, cpue.pair,
+     file = "a_RData_3Species/10_Length.RData")
+
+
+# 20 Length
+save(cpue.lngt.subarea.yearqua, cpue.lngt.yearqua, cpue.length.subarea.yearqua, cpue.length.year, cpue.year, cpue.pair,
+     file = "a_RData_3Species/20_Length.RData")
+
+# 15 Length
+save(cpue.lngt.subarea.yearqua, cpue.lngt.yearqua, cpue.length.subarea.yearqua, cpue.length.year, cpue.year, cpue.pair,
+     file = "a_RData_3Species/15_Length.RData")
+
+```
+
+#----------Load RData
+
+```{r}
+
+load("a_RData_3Species/10_Length.RData")
+load("a_RData_3Species/20_Length.RData")
+load("a_RData_3Species/15_Length.RData")
+
+```
+
+
+#-----20220104Test Fishing-----
+Fishing effort indicators 
+https://onlinelibrary.wiley.com/doi/abs/10.1111/fme.12021
+
+```{r}
+FishingM
+plot(FishingM$Fishing_Mortality,
+     FishingM$TSB_Tonnes)
+cor.test(FishingM$Fishing_Mortality,
+         FishingM$TSB_Tonnes)
+cpue.year
+cor.test(cpue.year$MeanBT_scale,
+         cpue.year$TSB_Tonnes_scale)
+plot(cpue.year$MeanBT_scale,
+     cpue.year$TSB_Tonnes_scale)
+
+
+
+plot(cpue.year$Fishing_Mortality,
+     cpue.year$TSB_Tonnes)
+
+plot(cpue.year$Year,cpue.year$Fishing_Mortality)
+
+
+# Temporal trends
+ggplot(data = cpue.year,
+       aes(x = Year, 
+           y = Fishing_Mortality,
+           color = Species)) +
+  geom_point()+
+  geom_smooth(method = "loess")
+  
+ggplot(data = cpue.year,
+       aes(x = Year, 
+           y = TSB_Tonnes,
+           color = Species)) +
+  geom_point()+
+  geom_smooth(method = "loess")
+
+ggplot(data = cpue.year,
+       aes(x = Year, 
+           y = MeanBT,
+           color = Species)) +
+  geom_point()+
+  geom_smooth(method = "loess")
+
+# pair correlations
+#1
+ggplot(data = cpue.year,
+       aes(x = MeanBT, 
+           y = TSB_Tonnes,
+           color = Species)) +
+  geom_point()+
+  geom_smooth(method = "lm")
+
+cor.test(cpue.year$MeanBT,
+         cpue.year$TSB_Tonnes)
+
+#2
+ggplot(data = cpue.year,
+       aes(x = MeanBT, 
+           y = Fishing_Mortality,
+           color = Species)) +
+  geom_point()+
+  geom_smooth(method = "lm")
+
+cor.test(cpue.year$MeanBT,
+         cpue.year$Fishing_Mortality)
+
+#3
+ggplot(data = cpue.year,
+       aes(x = TSB_Tonnes, 
+           y = Fishing_Mortality,
+           color = Species)) +
+  geom_point()+
+  geom_smooth(method = "lm")
+
+cor.test(cpue.year$TSB_Tonnes,
+         cpue.year$Fishing_Mortality)
+
+
+```
+
+
+#------Plot fishing and temperature------- 
+Fishing_Mortality
+TSB_Tonnes
+MeanBT
+
+# Plot Fishing & bottomT ~ year
+Save as PDF, 3 x 7
+```{r}
+# TSB ~ Year
+p1 <- cpue.year %>% 
+  ggplot(aes(y = TSB_Tonnes / 1000000,
+             x = Year,
+             color = Species))+
+           geom_point()+ geom_line()+
+  xlab("Year")+ 
+  ylab("Total stock biomass (million tonne)")+
+   theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x=element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.title = element_blank(),
+        legend.position = c(.82,.82),
+        strip.text.x = element_text(size = 11),
+        legend.background = element_blank())+
+  scale_x_continuous(breaks = seq(1977, 2019, by = 14)) + ylim(0,2.5) +
+  annotate("text", x=1977, y=2.5, label= "(a)") 
+
+# Temperature ~ Year
+p2 <- cpue.year %>% 
+  ggplot(aes(y = MeanBT,
+             x = Year))+
+           geom_point()+ geom_line()+
+  xlab("Year")+ 
+  ylab(expression
+       (Sea~bottom~temperature~(""^o~C)))+
+   theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x=element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.title = element_blank(),
+        #legend.position = c(.82,.82),
+        strip.text.x = element_text(size = 11))+
+  scale_x_continuous(breaks = seq(1977, 2019, by = 14)) + ylim(3,8)+
+  annotate("text", x=1977, y=8, label= "(b)")
+
+# Align two graphs
+require(gridExtra)
+grid.arrange(p1, p2, ncol=2)
+
+```
+
+
+
+#---------------Fig1_Map-----------------------------
+
+#Compute juv & adult
+```{r, fig.width = 20}
+
+# Maturation length
+# Cod:45.5 cm
+# Haddock: 33.5 cm
+# Whiting: 21.7 cm
+# Saithe: 55.4 cm 
+# Atlantic mackerel: 26.2 cm 
+# Norway pout: 12.4 cm 
+
+
+# Function to cut into juv and adult
+cut.juv.adu <- function(species,mature.mm){
+  cpue.lngt.subarea.yearqua %>% 
+    # Filter North Sea data
+    filter(Region == "North Sea") %>% 
+    filter(Species == species) %>% 
+  mutate(Length_JA = replace(LngtClass, LngtClass<mature.mm, "A_Juvenile")) %>% 
+  mutate(Length_JA = replace(Length_JA, LngtClass>=mature.mm, "B_Adult")) 
+}
+
+cod<-cut.juv.adu("Atlantic cod", 455)
+haddock<-cut.juv.adu("Haddock",335)
+whiting<-cut.juv.adu("Whiting",217)
+
+
+cpue.juv.adu.subarea.yearqua <-
+  bind_rows(cod,haddock, whiting)
+
+# Sum CPUE by big and small groups
+cpue.juv.adu.subarea.yearqua <-
+  cpue.juv.adu.subarea.yearqua %>% 
+  mutate(lon = ices.rect(SubArea)$lon,
+         lat = ices.rect(SubArea)$lat) %>% 
+  group_by(YearQua, Species, lon, lat, Length_JA) %>%
+  summarise (CPUE_Length_Subarea_Yearqua_JA
+             = sum(CPUE_Lngt_SubArea_YearQua)) %>%
+  ungroup(Length_JA) %>% 
+  mutate_at('Length_JA', as.factor) %>% 
+  mutate_at('YearQua', as.factor)
+
+```  
+    
+
+
+# Map with same scale color
+lims(alpha = c(-3,10)) to make the overall color darker
+Export:result in console-->export-->save as PDF-->
+Device 14 x 21 inches, landscape.
+
+```{r fig.width = 20}
+
+# Check maximum of log_CPUE for juv and adul of 3 species
+cpue.juv.adu.subarea.yearqua %>% 
+    filter (YearQua %in% c("1977.1",
+                           "1991.1",
+                           "2005.1",
+                           "2019.1")) %>% 
+  mutate(log_CPUE = log(CPUE_Length_Subarea_Yearqua_JA)) %>% 
+  group_by(Length_JA) %>% 
+  summarise(Max = max(log_CPUE))
+
+## Max_log_CPUE across year and species:
+## Juvenile	9.974715,Adult	10.023402	 
+
+# background
+xmin <- -4.5
+xmax <- 13.5
+ymin <- 48.75
+ymax <- 60.75
+
+background <- ggplot()+
+  borders("world", xlim = c(xmin, xmax), ylim = c(ymin, ymax), fill = "grey70",colour = NA, size = 4) +
+  scale_size_area() +
+  coord_map(xlim = c(xmin, xmax), ylim = c(ymin, ymax))+
+  theme_bw()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), 
+    axis.line=element_line(colour = "black"),
+    #axis.text.x=element_text(size = 22),
+    #axis.text.y = element_text(size = 22),
+    #axis.ticks.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_blank(),
+    axis.title.x=element_blank(),
+    axis.title.y=element_blank(),
+    #legend.position="none",
+    ##legend.title = element_blank will remove all title
+    legend.title = element_blank(),
+    ##strip.text.x = element_blank() will remove x axis text
+    strip.text.x = element_blank(),
+    ## Change legend font size
+    legend.text=element_text(size=22))+
+  ## This change overall legend text and symbol sizes
+  guides(alpha = guide_legend(override.aes = list(size = 5)))
+
+
+# Function to plot juv and adu
+plot.juv.adu <- function(name){
+  # Filter by species name
+  d1<- cpue.juv.adu.subarea.yearqua %>% 
+  filter(Species == name) %>% 
+    filter (YearQua %in% c("1977.1",
+                           "1991.1",
+                           "2005.1",
+                           "2019.1"))
+  
+  
+# Plot small (CPUE as alpha)
+q1<-background +   
+  geom_point(shape = 15,color = "red",
+             aes(x = lon, y = lat, size = 0.5,
+                 alpha = log(CPUE_Length_Subarea_Yearqua_JA)),
+             data = subset(d1,d1$Length_JA== "A_Juvenile"))+
+  facet_wrap(~YearQua,ncol = 8) + 
+  lims(alpha = c(-3,10))
+  
+# Plot big (CPUE as alpha)
+q2<-background +   
+  geom_point(colour = "blue",shape = 15, 
+             aes(x = lon, y = lat, size = 0.5,
+                 alpha = log(CPUE_Length_Subarea_Yearqua_JA)),
+             data = subset(d1,d1$Length_JA== "B_Adult"))+
+  facet_wrap(~YearQua,ncol = 8) + 
+  lims(alpha = c(-3,10))
+   
+# Plot small + big
+q3<-background +  
+  geom_point(shape = 15, alpha = 0.5,
+             aes(x = lon, y = lat, size = 0.5,  
+                 color= Length_JA), data = d1)+
+  facet_wrap(~YearQua,ncol = 8)+
+  scale_color_manual (values = c("red","blue"),
+                      name = "Length_JA ", 
+                      labels = c("j.u.", "a.d."))+
+  guides(color = guide_legend(override.aes = list(size = 5)))
+  
+  
+# output all 3 grpahs
+grid.arrange (q1,q2,q3,ncol = 1)
+# output only juv+adu
+#q3
+# output only q1 and q2
+#grid.arrange(q1,q2,ncol =3)
+# q2
+
+}
+
+plot.juv.adu("Atlantic cod")
+plot.juv.adu("Haddock")
+plot.juv.adu("Whiting")
+
+```
+
+
+# Map all years
+Export as PDF: 60 x 60
+```{r fig.width = 20}
+
+# Check maximum of log_CPUE for juv and adul of 3 species
+cpue.juv.adu.subarea.yearqua %>% 
+  mutate(log_CPUE = log(CPUE_Length_Subarea_Yearqua_JA)) %>% 
+  group_by(Length_JA) %>% 
+  summarise(Max = max(log_CPUE))
+
+## Max_log_CPUE across year and species:
+## Juvenile	9.974715,Adult	10.023402	 
+
+
+
+# background
+xmin <- -4.5
+xmax <- 13.5
+ymin <- 48.75
+ymax <- 60.75
+
+background <- ggplot()+
+  borders("world", xlim = c(xmin, xmax), ylim = c(ymin, ymax), fill = "grey70",colour = NA, size = 4) +
+  scale_size_area() +
+  coord_map(xlim = c(xmin, xmax), ylim = c(ymin, ymax))+
+  theme_bw()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), 
+    axis.line=element_line(colour = "black"),
+    #axis.text.x=element_text(size = 22),
+    #axis.text.y = element_text(size = 22),
+    #axis.ticks.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_blank(),
+    axis.title.x=element_blank(),
+    axis.title.y=element_blank(),
+    #legend.position="none",
+    ##legend.title = element_blank will remove all title
+    legend.title = element_blank(),
+    ## Change legend font size
+    legend.text=element_text(size=22),
+    ## Add year as strip on the top
+    strip.text.x = element_text(size = 15))+
+  ## This change overall legend text and symbol sizes
+  guides(alpha = guide_legend(override.aes = list(size = 5)))
+
+
+
+## Create a year variable for stripe title
+cpue.juv.adu.subarea.yearqua.year <-
+  cpue.juv.adu.subarea.yearqua %>%
+  separate(YearQua, into = c("Year", "Quarter"))
+
+
+# Function to plot juv and adu
+plot.juv.adu <- function(name){
+  # Filter by species name
+  d1<- cpue.juv.adu.subarea.yearqua.year %>% 
+  filter(Species == name) 
+  
+# Plot small (CPUE as alpha)
+q1<-background +   
+  geom_point(shape = 15,color = "red",
+             aes(x = lon, y = lat, size = 0.5,
+                 alpha = log(CPUE_Length_Subarea_Yearqua_JA)),
+             data = subset(d1,d1$Length_JA== "A_Juvenile"))+
+  facet_wrap(~Year,ncol = 15) + 
+  lims(alpha = c(-3,10))
+  
+# Plot big (CPUE as alpha)
+q2<-background +   
+  geom_point(colour = "blue",shape = 15, 
+             aes(x = lon, y = lat, size = 0.5,
+                 alpha = log(CPUE_Length_Subarea_Yearqua_JA)),
+             data = subset(d1,d1$Length_JA== "B_Adult"))+
+  facet_wrap(~Year,ncol = 15) + 
+  lims(alpha = c(-3,10))
+   
+# Plot small + big
+q3<-background +  
+  geom_point(shape = 15, alpha = 0.5,
+             aes(x = lon, y = lat, size = 0.5,  
+                 color= Length_JA), data = d1)+
+  facet_wrap(~Year,ncol = 15)+
+  scale_color_manual (values = c("red","blue"),
+                      name = "Length_JA ", 
+                      labels = c("j.u.", "a.d."))+
+  guides(color = guide_legend(override.aes = list(size = 5)))
+  
+  
+# output all 3 grpahs
+grid.arrange (q1,q2,q3,ncol = 1)
+# output only juv+adu
+#q3
+# output only q1 and q2
+#grid.arrange(q1,q2,ncol =3)
+# q2
+
+}
+
+plot.juv.adu("Atlantic cod")
+plot.juv.adu("Haddock")
+plot.juv.adu("Whiting")
+
+```
+
+
+
+#--------- Fig 2_overlap over time
+
+# lmer logit (Year|Length)
+```{r message = FALSE}
+
+Area_overlap_function <- function(species, dd){
+  dd.species <- dd %>% filter(Species ==species)
+  m <- lmer(logit(Area_overlap) ~ Year_scale_centered +
+              (Year_scale_centered|Pair_id),dd.species)
+  F_value <- anova(m)[1,5]
+  p_value <- anova(m)[1,6]
+  R2_c <- r.squaredGLMM(m)[1,2]
+  R2_m <- r.squaredGLMM(m)[1,1]
+  Fixed_estimate <- coef(summary(m))[2,1]
+  Conf_2.5 <- confint(m)[6,1]
+  Conf_97.5 <- confint(m)[6,2]
+  tibble(Species = species,
+         Response = "Range_overlap",
+         F_value,p_value, R2_c, R2_m,
+         Fixed_estimate, Conf_2.5, Conf_97.5)
+  }
+
+cod_o <- Area_overlap_function("Atlantic cod",cpue.pair)
+haddock_o <- Area_overlap_function("Haddock",cpue.pair)
+whiting_o <- Area_overlap_function("Whiting",cpue.pair)
+model.overlap.output <- rbind(cod_o, haddock_o, whiting_o)
+
+
+
+# Overlap_deno
+Area_overlap_deno_function <- function(species, dd){
+  dd.species <- dd %>% filter(Species ==species)
+  m <- lmer(logit(Mean_Area_overlap_deno_xy) ~
+              Year_scale_centered +
+              (Year_scale_centered|Pair_id),dd.species)
+  F_value <- anova(m)[1,5]
+  p_value <- anova(m)[1,6]
+  R2_c <- r.squaredGLMM(m)[1,2]
+  R2_m <- r.squaredGLMM(m)[1,1]
+  Fixed_estimate <- coef(summary(m))[2,1]
+  Conf_2.5 <- confint(m)[6,1]
+  Conf_97.5 <- confint(m)[6,2]
+  tibble(Species = species,
+         Response = "Range_overlap_deno",
+         F_value,p_value, R2_c,R2_m,
+         Fixed_estimate, Conf_2.5, Conf_97.5)
+  }
+
+cod_d <- Area_overlap_deno_function("Atlantic cod",cpue.pair)
+haddock_d <- Area_overlap_deno_function("Haddock",cpue.pair)
+whiting_d <- Area_overlap_deno_function("Whiting",cpue.pair)
+model.overlap.output.deno <- rbind(cod_d, haddock_d, whiting_d)
+
+# output table combine
+model.overlap.output.all <- rbind(model.overlap.output,model.overlap.output.deno)
+
+```
+
+
+# double check R2 from model
+```{r}
+
+cod.dd <- cpue.pair %>% filter(Species == "Haddock")
+
+m <- lmer((Area_overlap) ~ Year_scale_centered + (Year_scale_centered|Pair_id),cod.dd)
+
+r.squaredGLMM(m)
+
+```
+
+
+# Save model output
+```{r}
+# 10 length
+write.csv(model.overlap.output.all,
+          file ="a_RData_3Species/10Length_model_overlap_output_all.csv")
+
+# 20 length
+write.csv(model.overlap.output.all,
+          file ="a_RData_3Species/20Length_model_overlap_output_all.marginal.r.csv")
+
+# 15 length
+write.csv(model.overlap.output.all,
+          file ="a_RData_3Species/15Length_model_overlap_output_all.csv")
+
+```
+
+# Combine & save model output table for 10, 15, 20 lenghts
+```{r}
+# Load 10, 15, 20 data
+Length.10 <- read.csv(file ="a_RData_3Species/10Length_model_overlap_output_all.csv")
+
+Length.15 <- read.csv(file ="a_RData_3Species/15Length_model_overlap_output_all.csv")
+
+Length.20 <- read.csv(file ="a_RData_3Species/20Length_model_overlap_output_all.csv")
+
+# Add a length column in each tibble
+Length.10 <- tibble(Length = 10, Length.10)
+Length.15 <- tibble(Length = 15, Length.15)
+Length.20 <- tibble(Length = 20, Length.20)
+
+# Bind 3 tibbles
+Length.10.15.20 <- rbind(Length.10, Length.15, Length.20)
+
+# Range tibble 
+Length.10.15.20 <- Length.10.15.20 %>% arrange(Species, Response)
+
+write.csv(Length.10.15.20,
+          file ="a_RData_3Species/10_15_20_Length_model_overlap_output_all.csv")
+
+```
+
+
+# Model diagnostics
+Code to diagnose model for individual species  
+
+```{r eval = FALSE}
+## Response: Area_overlap, Mean_Area_overlap_deno_xy
+cpue.pair.cod <- cpue.pair %>% 
+  filter(Species == "Atlantic cod") 
+
+cpue.pair.haddock <- cpue.pair %>% 
+  filter(Species == "Haddock") 
+
+cpue.pair.whiting <- cpue.pair %>% 
+  filter(Species == "Whiting") 
+
+m1 <- lmer(logit(Mean_Area_overlap_deno_xy) ~ 
+             Year_scale_centered+
+            (Year_scale_centered|Pair_id),
+            cpue.pair.whiting)
+summary(m1)
+coef(m1)$Pair_id %>%
+  summarise(mean = mean(Year_scale_centered))
+plot(m1)
+r.squaredGLMM(m1) 
+
+simulationOutput <- simulateResiduals(fittedModel = m1)
+plot(simulationOutput) 
+
+```
+
+
+# Model prediction for fixed effect
+```{r}
+# snippet for cod
+data.cod <- cpue.pair %>% 
+  filter(Species == "Atlantic cod") 
+x <- data.cod$Year
+y <- data.cod$Area_overlap 
+m <- lm(logit(y)~x)
+model.fit <- data.frame(x = seq(min(x), max(x), by = 0.01))
+model.fit <- transform (model.fit, Fitted =predict(m,model.fit))
+
+ggplot(data = data.cod,
+       aes(x = as.numeric(Year), y = Area_overlap)) +
+ geom_line(aes(group = Pair_id),color = "gray", size = 0.1)+
+  geom_line(data = model.fit,aes(x=x,y=exp(Fitted)),color = "black", lty = 1)
+
+
+# prediction for all species for area_overlap
+mod_overlap <- function(species){
+  dd <- cpue.pair %>% filter(Species == species) 
+  x <- dd$Year
+  y <- dd$Area_overlap
+  m <- lm(logit(y)~x)
+  model.fit <- data.frame(x = seq(min(x), max(x), by = 0.01))
+  model.fit <- transform (model.fit, Fitted =predict(m,model.fit))
+  model.fit
+  tibble(Species = species, model.fit)
+  }
+
+# prediction for all species for area_overlap_deno
+mod_overlap_deno <- function(species){
+  d1 <- cpue.pair %>% filter(Species == species) 
+  x <- cpue.pair %>% filter(Species == species) %>% pull(Year)
+  y <- cpue.pair %>% filter(Species == species) %>% pull(Mean_Area_overlap_deno_xy)
+  m <- lm(logit(y)~x)
+  model.fit <- data.frame(x = seq(min(x), max(x), by = 0.01))
+  model.fit <- transform (model.fit, Fitted =predict(m,model.fit))
+  model.fit
+  tibble(Species = species, model.fit)}
+
+mod.overlap <- rbind(mod_overlap("Atlantic cod"),
+      mod_overlap("Haddock"),
+      mod_overlap("Whiting"))
+
+mod.overlap <- tibble(Response = "Area_overlap", mod.overlap)
+
+mod.overlap.deno <- rbind(mod_overlap_deno("Atlantic cod"),
+                          mod_overlap_deno("Haddock"),
+                          mod_overlap_deno("Whiting"))
+
+mod.overlap.deno <- tibble(Response = "Area_overlap_deno",
+                            mod.overlap.deno)
+
+mod.overlap.all <- rbind(mod.overlap,mod.overlap.deno)
+
+```
+
+# Fig. overlap & overlap deno
+Export as PDF: 3 x 8
+Edit the PDF file in Keynote and export keynote file as PDF
+result in high resolution images
+```{r message =FALSE}
+
+# Plot Area_overlap
+ggplot(data = cpue.pair,
+       aes(x = as.numeric(Year), y = Area_overlap * 100)) +
+  geom_line(aes(group = Pair_id),color = "gray", size = 0.1)+
+  geom_line(data = mod.overlap,
+            aes(x = x,
+                y = exp(Fitted)/(1+exp(Fitted))*100),
+            color = "black", size = 1.5)+
+  facet_wrap(vars(Species), "free_y")+#<Function>: get overlap Infos for paired cpue.group data
+  scale_color_viridis_d(alpha = .3) +
+  xlab("Year") +
+  ylab("Pairwise range overlap") + theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x=element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        panel.spacing = unit(0.9, "lines"),
+        strip.text.x = element_text(size = 11))+
+  scale_x_continuous(breaks = seq(1977, 2019, by = 14))+
+  scale_y_continuous(breaks = seq(0, 100, by = 25),
+                     limits = c(0,120))
+        
+# Plot Area_overlap_deno
+ggplot(data = cpue.pair,
+       aes(x = as.numeric(Year), 
+           y = Mean_Area_overlap_deno_xy * 100)) +
+  geom_line(aes(group = Pair_id),color = "gray", size = 0.1)+
+  geom_line(data = mod.overlap.deno,
+            aes(x = x,
+                y = exp(Fitted)/(1+exp(Fitted))*100),
+            color = "black", size = 1.5)+
+  facet_wrap(vars(Species), "free_y")+
+  scale_color_viridis_d(alpha = .3) +
+  xlab("Year") +
+  ylab("Pairwise range overlap deno") + theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x=element_text(size = 10),
+        axis.text.y = element_text(size = 10))+
+  scale_x_continuous(breaks = seq(1977, 2019, by = 14))+
+  theme(panel.spacing = unit(0.9, "lines"))+
+  theme(strip.text.x = element_text(size = 11))+
+  scale_y_continuous(breaks = seq(0, 100, by = 25),
+                     limits = c(0,120))
+
+```
+
+
+
+
+#----------Fig 2.1 Range of individual size------
+
+# lmer logit (Year|Length)
+```{r}
+
+Range_size_function <- function(species, dd){
+  dd.species <- dd %>% filter(Species ==species)
+  m <- lmer(logit(Stan_SubArea_Length) ~ Year_scale_centered +
+              (Year_scale_centered|Length),dd.species)
+  F_value <- anova(m)[1,5]
+  p_value <- anova(m)[1,6]
+  R2_c <- r.squaredGLMM(m)[1,2]
+  Fixed_estimate <- coef(summary(m))[2,1]
+  Conf_2.5 <- confint(m)[6,1]
+  Conf_97.5 <- confint(m)[6,2]
+  tibble(Species = species,
+         Response = "Range_overlap",
+         F_value,p_value, R2_c,
+         Fixed_estimate, Conf_2.5, Conf_97.5)
+  }
+
+cod_s <- Range_size_function("Atlantic cod",cpue.length.year)
+haddock_s <- Range_size_function("Haddock",cpue.length.year)
+whiting_s <- Range_size_function("Whiting",cpue.length.year)
+model.RangeSize.output <- rbind(cod_s, haddock_s, whiting_s)
+
+Length.20
+```
+
+# Save model output
+```{r}
+# 20 length
+write.csv(model.RangeSize.output ,
+          file ="a_RData_3Species/20Length_model_RangeSize_output.csv")
+```
+
+# Model diagnostics
+Code to diagnose model for individual species  
+
+```{r eval = FALSE}
+
+data.cod <- cpue.length.year %>% 
+  filter(Species == "Atlantic cod")
+
+data.haddock <- cpue.length.year %>% 
+  filter(Species == "Haddock") 
+
+data.whiting <- cpue.length.year %>% 
+  filter(Species == "Whiting") 
+
+# glmer
+m1 <- glmer(Stan_SubArea_Length ~ Year_scale_centered +
+              (1|Length), family = binomial, data.cod)
+summary(m1)
+r.squaredGLMM(m1)
+plot(m1)
+simulationOutput <- simulateResiduals(fittedModel = m1)
+plot(simulationOutput) 
+
+
+# lmer logit
+m1 <- lmer(logit(Stan_SubArea_Length) ~ 
+             Year_scale_centered+
+            (Year_scale_centered|Length),
+            data.haddock)
+summary(m1)
+anova(m1)
+coef(m1)$Length %>%
+  summarise(mean = mean(Year_scale_centered))
+plot(m1)
+r.squaredGLMM(m1) 
+simulationOutput <- simulateResiduals(fittedModel = m1)
+plot(simulationOutput) 
+```
+
+
+# Model prediction for fixed effect
+```{r}
+
+# prediction for all species
+model_prediction_RS <- function(species){
+  dd <- cpue.length.year %>% filter(Species == species) 
+  x <- dd$Year
+  y <- dd$Stan_SubArea_Length
+  m <- lm(logit(y)~x)
+  model.fit <- data.frame(x = seq(min(x), max(x), by = 0.01))
+  model.fit <- transform (model.fit, Fitted =predict(m,model.fit))
+  model.fit
+  tibble.model <- tibble(Species = species, model.fit)
+  rename(tibble.model, xvar = x)
+  }
+
+prediction.cod.RS <- model_prediction_RS("Atlantic cod")
+prediction.haddock.RS <- model_prediction_RS("Haddock")
+prediction.whiting.RS <- model_prediction_RS("Whiting")
+
+prediction.3species.RS <- 
+rbind(prediction.cod.RS,
+      prediction.haddock.RS,
+      prediction.whiting.RS)
+
+```
+
+
+
+
+# Fig. Range size
+output: PDF 3 x 8
+```{r message = FALSE}
+
+# Order size groups
+cpue.length.year <- cpue.length.year %>% 
+  mutate(
+    Length = factor
+    (Length,levels=c("0","1","2","3","4","5","6",
+                     "7","8","9","10","11","12","13",
+                     "14","15","16","17","18","19")))
+
+# Plot
+ggplot(data = cpue.length.year,
+       aes(x = as.numeric(YearQua), 
+           y = Stan_SubArea_Length * 100)) +
+  facet_wrap(~Species)+
+  geom_line(aes(color = Length))+
+  # Solid line for Atlantic cod and haddock
+  geom_line(data = prediction.3species.RS%>% 
+              filter (Species %in% c("Atlantic cod", "Haddock")),
+            aes(x = xvar,
+                y = (exp(Fitted)/(1+exp(Fitted)))*100),
+            color = "black", size = 1.5)+
+  scale_color_viridis_d(alpha = .5)+
+  xlab("Year") +
+  ylab("Standardized distriubtion range") +
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x=element_text(size = 10),
+        axis.text.y = element_text(size = 10))+
+  scale_x_continuous(breaks = seq(1977, 2019, by = 14))+
+  scale_y_continuous(breaks = seq(0, 100, by = 25),
+                     limits = c(0,120))+
+  theme(panel.spacing = unit(0.9, "lines"))+
+  theme(strip.text.x = element_text(size = 11))+
+  theme(legend.position = "none")
+
+```
+
+
+#---------------Fig 2.2 2.3 Paired disance --------
+
+# lmer logit (Year|Length)
+```{r}
+
+Lon_function <- function(species, dd){
+  dd.species <- dd %>% filter(Species ==species)
+  m <- lmer(Distance_lon ~ Year_scale_centered +
+              (Year_scale_centered|Pair_id),dd.species)
+  F_value <- anova(m)[1,5]
+  p_value <- anova(m)[1,6]
+  R2_c <- r.squaredGLMM(m)[1,2]
+  Fixed_estimate <- coef(summary(m))[2,1]
+  Conf_2.5 <- confint(m)[6,1]
+  Conf_97.5 <- confint(m)[6,2]
+  tibble(Species = species,
+         Response = "Distance_lon",
+         F_value,p_value, R2_c,
+         Fixed_estimate, Conf_2.5, Conf_97.5)
+  }
+
+cod_lon <- Lon_function("Atlantic cod",cpue.pair)
+haddock_lon <- Lon_function("Haddock",cpue.pair)
+whiting_lon <- Lon_function("Whiting",cpue.pair)
+model.lon.output <- rbind(cod_lon, haddock_lon, whiting_lon)
+
+
+
+Lat_function <- function(species, dd){
+  dd.species <- dd %>% filter(Species ==species)
+  m <- lmer(Distance_lat ~ Year_scale_centered +
+              (Year_scale_centered|Pair_id),dd.species)
+  F_value <- anova(m)[1,5]
+  p_value <- anova(m)[1,6]
+  R2_c <- r.squaredGLMM(m)[1,2]
+  Fixed_estimate <- coef(summary(m))[2,1]
+  Conf_2.5 <- confint(m)[6,1]
+  Conf_97.5 <- confint(m)[6,2]
+  tibble(Species = species,
+         Response = "Distance_lat",
+         F_value,p_value, R2_c,
+         Fixed_estimate, Conf_2.5, Conf_97.5)
+  }
+
+cod_lat <- Lat_function("Atlantic cod",cpue.pair)
+haddock_lat <- Lat_function("Haddock",cpue.pair)
+whiting_lat <- Lat_function("Whiting",cpue.pair)
+model.lat.output <- rbind(cod_lat, haddock_lat, whiting_lat)
+
+# Combine lon+lat output
+model.dist.output <- rbind(model.lon.output,
+                           model.lat.output)
+
+```
+
+# Save model output
+```{r}
+write.csv(model.dist.output,
+          file ="a_RData_3Species/20Length_model_Distance_output.csv")
+
+```
+
+
+# Model diagnostics
+Code to diagnose model for individual species  
+
+```{r eval = FALSE}
+## Response: Area_overlap, Mean_Area_overlap_deno_xy
+cpue.pair.cod <- cpue.pair %>% 
+  filter(Species == "Atlantic cod") 
+
+cpue.pair.haddock <- cpue.pair %>% 
+  filter(Species == "Haddock") 
+
+cpue.pair.whiting <- cpue.pair %>% 
+  filter(Species == "Whiting") 
+
+m1 <- lmer((Distance_lon) ~ 
+             Year_scale_centered+
+            (Year_scale_centered|Pair_id),
+            family = poisson,
+            cpue.pair.haddock)
+summary(m1)
+coef(m1)$Pair_id %>%
+  summarise(mean = mean(Year_scale_centered))
+plot(m1)
+r.squaredGLMM(m1) 
+
+simulationOutput <- simulateResiduals(fittedModel = m1)
+plot(simulationOutput) 
+
+
+```
+
+
+
+# Model prediction for fixed effect
+```{r}
+
+# Model prediction lon
+
+mod_lon <- function(species){
+  dd <- cpue.pair %>% filter(Species == species) 
+  x <- dd$Year
+  y <- dd$Distance_lon
+  m <- lm(y~x)
+  model.fit <- data.frame(x = seq(min(x), max(x), by = 0.01))
+  model.fit <- transform (model.fit, Fitted =predict(m,model.fit))
+  model.fit
+  tibble(Species = species, model.fit)
+  }
+
+mod.lon.all <- rbind(mod_lon("Atlantic cod"),
+                     mod_lon("Haddock"),
+                     mod_lon("Whiting"))
+
+
+# Model prediction lat
+
+mod_lat <- function(species){
+  dd <- cpue.pair %>% filter(Species == species) 
+  x <- dd$Year
+  y <- dd$Distance_lat
+  m <- lm(y~x)
+  model.fit <- data.frame(x = seq(min(x), max(x), by = 0.01))
+  model.fit <- transform (model.fit, Fitted =predict(m,model.fit))
+  model.fit
+  tibble(Species = species, model.fit)
+  }
+
+mod.lat.all <- rbind(mod_lat("Atlantic cod"),
+                     mod_lat("Haddock"),
+                     mod_lat("Whiting"))
+
+```
+
+
+# Fig. Paired_lon/lat
+output: PDF 3 x 8
+```{r message =FALSE}
+
+# Check max lon and lat
+cpue.pair %>%
+  summarise(lon_max = max(Distance_lon, na.rm = T),
+            lat_max = max(Distance_lat, na.rm = T))
+
+# Lon
+ggplot(data = cpue.pair,
+       aes(x = as.numeric(Year), y = Distance_lon )) +
+  geom_line(aes(group = Pair_id),color = "gray", size = 0.1)+
+  geom_line(data = mod.lon.all %>% 
+              filter(Species %in% c("Haddock","Whiting")),
+            aes(x = x,
+                y = Fitted), size = 1.5)+
+  facet_wrap(vars(Species), "free_y")+
+  xlab("Year") +
+  ylab("Distance_lon") + theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x=element_text(size = 10),
+        axis.text.y = element_text(size = 10))+
+  scale_x_continuous(breaks = seq(1977, 2019, by = 14))+
+  theme(panel.spacing = unit(0.9, "lines"))+
+  theme(strip.text.x = element_text(size = 11))+
+  scale_y_continuous(breaks = seq(0, 9, by = 3),
+                     limits = c(0,12))
+
+# Lat
+ggplot(data = cpue.pair,
+       aes(x = as.numeric(Year), y = Distance_lat)) +
+  geom_line(aes(group = Pair_id),color = "gray", size = 0.1)+
+  geom_line(data = mod.lat.all,
+            aes(x = x,
+                y = Fitted), size = 1.5)+
+  facet_wrap(vars(Species), "free_y")+
+  xlab("Year") +
+  ylab("Distance_lat") + theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x=element_text(size = 10),
+        axis.text.y = element_text(size = 10))+
+  scale_x_continuous(breaks = seq(1977, 2019, by = 14))+
+  theme(panel.spacing = unit(0.9, "lines"))+
+  theme(strip.text.x = element_text(size = 11))+
+  scale_y_continuous(breaks = seq(0, 9, by = 3),
+                     limits = c(0,12))
+
+
+
+```
+
+
+
+
+#---------------Fig 2.4 Relationship-----------
+
+
+# Regression_Diff_AR: improved overlap~ stan_area+ Dis 
+use AR1
+No interactive effect, so no interactive term
+```{r}
+
+# 1 Calculate AR for overlap & overlap_deno
+cpue.year.ar <- cpue.year %>% 
+  group_by(Species, Region) %>% 
+  # Calculate overlap AR
+  mutate(ar1_over = lag(Paired_habitat_overlap),
+         ar2_over = lag(ar1_over),
+         ar3_over = lag(ar2_over),
+         ar4_over = lag(ar3_over)) %>% 
+  # Calculate overlap first difference as model response variable
+  mutate(diff_over = Paired_habitat_overlap - ar1_over) %>%
+  # Overlap_deno AR
+  mutate(ar1_deno = lag(Paired_habitat_overlap_deno),
+         ar2_deno = lag(ar1_deno),
+         ar3_deno = lag(ar2_deno),
+         ar4_deno = lag(ar3_deno)) %>% 
+  # Overlap_deno first difference as model response variable
+  mutate(diff_deno = 
+           Paired_habitat_overlap_deno - ar1_deno)
+
+
+# 2 Standardize (scale_this)
+cpue.year.ar <- cpue.year.ar %>% 
+  group_by(Species, Region) %>% 
+  mutate(
+    s_SubArea = scale_this(Mean_Stan_SubArea),
+    s_LonDist = scale_this(Mean_paired_lon_distance),
+    s_LatDist = scale_this(Mean_paired_lat_distance))
+
+# 3 Subset needed variables
+cpue.year.ar <- cpue.year.ar %>% 
+  select(Species, diff_over,ar1_over,ar2_over,ar3_over,
+         ar4_over, diff_deno,ar1_deno,ar2_deno,
+         ar3_deno,ar4_deno,s_SubArea,s_LonDist,
+         s_LatDist)
+
+# 4 Subset to species
+dd.cod <- cpue.year.ar %>% 
+  filter(Species == "Atlantic cod")
+
+dd.haddock <- cpue.year.ar %>% 
+  filter(Species == "Haddock")
+
+dd.whiting <- cpue.year.ar %>% 
+  filter(Species =="Whiting")
+
+
+# 5 Check corr between Stan_range, lon_distance, lat_distance
+
+cor(dd.cod[,c("s_SubArea","s_LonDist","s_LatDist")])
+cor(dd.haddock[,c("s_SubArea","s_LonDist","s_LatDist")])
+cor(dd.whiting[,c("s_SubArea","s_LonDist","s_LatDist")])
+
+
+# 6 Function to model, statistics, and coef_table
+## 1 Overlap
+overlap_model <- function(species){
+  dd <- cpue.year.ar %>% 
+    filter(Species == species)
+  # Overlap
+  m <- lm(diff_over ~ ar1_over + 
+          s_SubArea + s_LonDist + s_LatDist, dd)
+  
+  coef <- c(coef(m)[3],coef(m)[4],coef(m)[5])
+  conf25 <- c(confint(m)[3,1],confint(m)[4,1],
+            confint(m)[5,1])
+  conf75 <- c(confint(m)[3,2],confint(m)[4,2],
+            confint(m)[5,2])
+  dd_over <- 
+    tibble(Species = species,
+           Response = "Overlap", 
+           Explanatory = 
+             c("SubArea", "LonDist","LatDist"),
+           coef,conf25,conf75)
+  
+  # Statistics output
+  list(vif(m),anova(m),summary(m),dd_over)
+  
+}
+
+
+## 2 Deno
+deno_model <- function(species){
+  dd <- cpue.year.ar %>% 
+    filter(Species == species)
+  # Deno
+  m <- lm(diff_deno ~ ar1_over +  
+            s_SubArea +s_LonDist + s_LatDist, dd)
+  
+  coef <- c(coef(m)[3],coef(m)[4],coef(m)[5])
+  conf25 <- c(confint(m)[3,1],confint(m)[4,1],
+            confint(m)[5,1])
+  conf75 <- c(confint(m)[3,2],confint(m)[4,2],
+            confint(m)[5,2])
+  dd_deno <- 
+    tibble(Species = species,
+           Response = "Overlap_deno",
+           Explanatory = 
+             c("SubArea", "LonDist", "LatDist"),
+           coef,conf25,conf75)
+  
+  # Statistics output
+  list(vif(m), anova(m),summary(m),dd_deno)
+  
+}
+
+
+overlap_model("Atlantic cod")
+overlap_model("Haddock")
+overlap_model("Whiting")
+deno_model("Atlantic cod")
+deno_model("Haddock")
+deno_model("Whiting")
+
+
+
+cor.test(dd.haddock$s_SubArea,dd.haddock$s_LonDist)
+
+```
+
+
+# 20210812 Regression_logistic_AR: improved overlap~ stan_area+ Dis use AR1
+vif of glm(family = binomial(link = "logit)) is higher than lm approach.
+```{r}
+
+# 1 Calculate AR for overlap & overlap_deno
+cpue.year.ar <- cpue.year %>% 
+  group_by(Species, Region) %>% 
+  # Calculate overlap AR
+  mutate(ar1_over = lag(Paired_habitat_overlap),
+         ar2_over = lag(ar1_over),
+         ar3_over = lag(ar2_over),
+         ar4_over = lag(ar3_over)) %>% 
+  # Calculate overlap first difference as model response variable
+  mutate(diff_over = Paired_habitat_overlap - ar1_over) %>%
+  # Overlap_deno AR
+  mutate(ar1_deno = lag(Paired_habitat_overlap_deno),
+         ar2_deno = lag(ar1_deno),
+         ar3_deno = lag(ar2_deno),
+         ar4_deno = lag(ar3_deno)) %>% 
+  # Overlap_deno first difference as model response variable
+  mutate(diff_deno = 
+           Paired_habitat_overlap_deno - ar1_deno)
+
+
+# 2 Standardize (scale_this)
+cpue.year.ar <- cpue.year.ar %>% 
+  group_by(Species, Region) %>% 
+  mutate(
+    s_SubArea = scale_this(Mean_Stan_SubArea),
+    s_LonDist = scale_this(Mean_paired_lon_distance),
+    s_LatDist = scale_this(Mean_paired_lat_distance))
+
+# 3 Subset needed variables
+cpue.year.ar <- cpue.year.ar %>% 
+  select(Species,Year,Paired_habitat_overlap, 
+         Paired_habitat_overlap_deno,
+         diff_over,ar1_over,ar2_over,ar3_over,
+         ar4_over, diff_deno,ar1_deno,ar2_deno,
+         ar3_deno,ar4_deno,s_SubArea,s_LonDist,
+         s_LatDist)
+
+# 4 Subset to species
+dd.cod <- cpue.year.ar %>% 
+  filter(Species == "Atlantic cod")
+
+dd.haddock <- cpue.year.ar %>% 
+  filter(Species == "Haddock")
+
+dd.whiting <- cpue.year.ar %>% 
+  filter(Species =="Whiting")
+
+
+# 5 Check corr between Stan_range, lon_distance, lat_distance
+
+cor(dd.cod[,c("s_SubArea","s_LonDist","s_LatDist")])
+cor(dd.haddock[,c("s_SubArea","s_LonDist","s_LatDist")])
+cor(dd.whiting[,c("s_SubArea","s_LonDist","s_LatDist")])
+
+
+# 6 Function to model, statistics, and coef_table
+## 1 Overlap
+overlap_model <- function(species){
+  dd <- cpue.year.ar %>% 
+    filter(Species == species)
+  # Overlap
+  m <- lm(diff_over ~ ar1_over +  
+            s_SubArea +s_LonDist + s_LatDist, dd)
+  
+  coef <- c(coef(m)[3],coef(m)[4],coef(m)[5])
+  conf25 <- c(confint(m)[3,1],confint(m)[4,1],
+            confint(m)[5,1])
+  conf75 <- c(confint(m)[3,2],confint(m)[4,2],
+            confint(m)[5,2])
+  dd_over <- 
+    tibble(Species = species,
+           Response = "Overlap", 
+           Explanatory = 
+             c("SubArea", "LonDist","LatDist"),
+           coef,conf25,conf75)
+  
+  # Statistics output
+  list(vif(m),anova(m),summary(m),dd_over)
+  
+}
+
+
+## 2 Deno
+deno_model <- function(species){
+  dd <- cpue.year.ar %>% 
+    filter(Species == species)
+  # Deno
+  m <- lm(diff_deno ~ ar1_deno +  
+            s_SubArea +s_LonDist + s_LatDist, dd)
+  
+  coef <- c(coef(m)[3],coef(m)[4],coef(m)[5])
+  conf25 <- c(confint(m)[3,1],confint(m)[4,1],
+            confint(m)[5,1])
+  conf75 <- c(confint(m)[3,2],confint(m)[4,2],
+            confint(m)[5,2])
+  dd_deno <- 
+    tibble(Species = species,
+           Response = "Overlap_deno",
+           Explanatory = 
+             c("SubArea", "LonDist", "LatDist"),
+           coef,conf25,conf75)
+  
+  # Statistics output
+  list(vif(m), anova(m),summary(m),dd_deno)
+  
+}
+
+
+overlap_model("Atlantic cod")
+overlap_model("Haddock")
+overlap_model("Whiting")
+deno_model("Atlantic cod")
+deno_model("Haddock")
+deno_model("Whiting")
+
+# vif of glm approach is higher than lm approach.
+# m<- lm(diff_over ~ ar1_over + 
+#           s_SubArea + s_LonDist + s_LatDist, dd.cod)
+# summary(m)
+# vif(m)
+# plot(m)
+# 
+# m2 <- glm(Paired_habitat_overlap ~ Year + ar1_over + 
+#           s_SubArea + s_LonDist + s_LatDist,
+#           family = binomial(link = "logit"), dd.cod)
+# 
+# vif(m2)
+# plot(m2)
+# summary(m2)
+# anova(m2)
+
+```
+
+
+
+# Compile stat table and plot
+output PDF 3 x 4
+Alter the title name by species
+```{r}
+
+over.cod <- overlap_model("Atlantic cod")
+over.had <- overlap_model("Haddock")
+over.whi <- overlap_model("Whiting")
+deno.cod <- deno_model("Atlantic cod")
+deno.had <- deno_model("Haddock")
+deno.whi <- deno_model("Whiting")
+
+
+# Plot function
+coef_plot <- function(species, dd.over, dd.deno){
+  dd <- rbind(dd.over[[4]],dd.deno[[4]])
+  pd <- position_dodge(width=0.8)
+  dd$Explanatory <- factor(dd$Explanatory,
+    levels = c('SubArea','LonDist','LatDist'),
+    ordered = TRUE)
+  ggplot(dd,aes(x = Explanatory, y = coef, group = Response))+
+  geom_point(position = pd, aes(shape = Response),
+             size = 2)+
+    scale_shape_manual(values=c(0, 2))+
+  geom_errorbar(aes(ymin = conf25, ymax= conf75),
+                position = pd,
+                width = 0.4,
+                size = 0.7)+
+    #facet_grid(. ~ "Atlantic cod")+
+    #facet_grid(. ~ "Haddock")+
+    facet_grid(. ~ "Whiting")+
+    
+  #scale_color_manual(values=c("coral","steelblue")) +
+  theme_bw()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), 
+    axis.line=element_line(colour = "black"))+
+    labs(y = "Model coefficient", x = "")+
+    scale_x_discrete(labels = c('Range \n size',
+              'Distance\n lon',
+              'Distance\n Lat'))+
+    scale_y_continuous(
+      breaks = seq(-0.04, 0.12, 0.04),
+      limits=c(-0.04, 0.12))+
+    geom_hline(yintercept=0, linetype="dashed", color = "black")+
+    theme(strip.text.x = element_text(size = 11))}
+
+coef_plot("Atlantic cod", over.cod, deno.cod)
+coef_plot("Haddock", over.had, deno.had)
+coef_plot("Whiting", over.whi, deno.whi)
+
+# Check R2 for plots
+over.cod[[3]]$adj.r.squared
+over.had[[3]]$adj.r.squared
+over.whi[[3]]$adj.r.squared
+deno.cod[[3]]$adj.r.squared
+deno.had[[3]]$adj.r.squared
+deno.whi[[3]]$adj.r.squared
+
+# Check p-value
+over.cod[[2]]
+over.had[[2]]
+over.whi[[2]]
+deno.cod[[2]]
+deno.had[[2]]
+deno.whi[[2]]
+
+```
+
+
+
+
+
+
+#------------------Fig 3 Size-specific pattern
+# Model range ~ time
+
+```{r}
+
+# 2021.11.26 Create logit_Stan_SubArea_Length
+cpue.length.year <- cpue.length.year %>% 
+  mutate(Logit_Stan_SubArea_Length = 
+           logit(Stan_SubArea_Length))
+
+# Use gather to create a column with all Y-variables
+cpue.length.year.y.gather <- cpue.length.year %>% 
+  #ungroup(YearQua) %>% 
+  mutate_at('Length', as.character) %>%
+  mutate_at('YearQua', as.numeric) %>% 
+  mutate(CPUE_Length_Year_log = log(CPUE_Length_Year)) %>% 
+  filter(Length %in% c(0,1,2,3,4,5,6,7,8,9,10,
+                       11,12,13,14,15,16,17,18,19)) %>% 
+  gather(key="Variables", value="value",
+         CPUE_Length_Year_log,Prop_CPUE_Length_Year,
+         Num_SubArea_Length, Prop_SubArea_Length,
+         Centroid_lon, Centroid_lat,
+         Stan_SubArea_Length,
+         Logit_Stan_SubArea_Length) 
+
+# Re-order Length
+cpue.length.year.y.gather <- cpue.length.year.y.gather %>% 
+  mutate(Length = factor(Length, levels = c("0","1","2","3","4","5","6",
+                              "7","8","9","10","11","12","13","14",
+                              "15","16","17","18","19")))
+
+
+# Split by Variables
+## Use split + imap can generate automatic plot titles
+cpue.length.year.pl <- cpue.length.year.y.gather %>% 
+  split(list(cpue.length.year.y.gather$Variables,
+             cpue.length.year.y.gather$Region))
+
+
+# Create plot function
+plot.fun <- function(.x,.y){
+  ggplot(data=.x, aes(x=YearQua,y=value))+
+    geom_point(size = 0.5, colour = "grey")+
+    facet_grid(Species~Length,scales= "free_y")+   
+    scale_y_continuous(name = element_blank()) +
+    geom_smooth(method='lm', formula= y~x, color = "black")+
+    xlab("Year") + theme + ggtitle(.y)
+  }
+
+# plot with imap
+purrr::imap(cpue.length.year.pl,plot.fun)
+
+
+```
+
+
+# Plot slope of CPUE & habitat~ time 
+
+```{r}
+theme <- 
+  theme_bw()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), 
+    axis.line=element_line(colour = "black"),
+    legend.position="none")
+
+
+n.data <- cpue.length.year.y.gather %>% 
+  group_by(Region, Species, Length, Variables) %>% 
+  nest()
+
+
+mod_fun <-function(df)lm(value ~ YearQua, data = df)
+
+mod.data <- n.data %>% 
+  mutate(model = purrr::map(data, mod_fun))
+
+slope_fun <- function(mod) coefficients(mod)[[2]]
+ci_lower_fun <- function(mod) confint(mod)[2,1]
+ci_upper_fun <- function(mod) confint(mod)[2,2]
+
+
+summarise.data <- mod.data %>% 
+  dplyr::mutate(., slope = map_dbl(model, slope_fun),
+            lower_ci = map_dbl(model, ci_lower_fun),
+            upper_ci = map_dbl(model, ci_upper_fun))
+
+
+# Alternative: plots by Y-axis
+# 1
+summarise.data.sp <- summarise.data %>% 
+  ungroup(Length) %>% 
+  mutate_at('Length', as.numeric) %>%
+  split(list(summarise.data$Variables,
+             summarise.data$Region))
+   
+# 2 Create plot function
+plot.fun.slope <- function(.x,.y){
+  ggplot(data=.x, aes(x = Length,y = slope))+
+    geom_point() + 
+    #geom_line()+
+    geom_errorbar(aes(ymin=lower_ci, ymax=upper_ci), width=.2,
+                 position=position_dodge(.9)) +
+    #geom_smooth(method='gam', formula= y~x)+
+    geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"))+
+  facet_grid(~Species, scales = "free")+
+  #scale_x_continuous(n.breaks = 10)+
+    geom_hline(yintercept=0, linetype='dotted')+
+  ylab("Temporal slope")+
+  xlab("Length group")+theme + theme + ggtitle(.y)
+  }
+
+
+# 3 plot with imap
+purrr::imap(summarise.data.sp,plot.fun.slope)
+
+
+
+```
+
+# Plot individually
+Export PDF 3  x 8
+```{r}
+# 1 Logit_Stan_SubArea_Length
+dd <- summarise.data %>% 
+  mutate_at('Length', as.numeric) %>%
+  filter(Variables == "Logit_Stan_SubArea_Length")
+
+ggplot(data=dd, aes(x = Length,y = slope))+
+    geom_point(size = 0.7) + 
+    geom_errorbar(aes(ymin=lower_ci, ymax=upper_ci), width=.2,
+                 position=position_dodge(.9)) +
+    geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"))+
+  facet_grid(~Species, scales = "free")+
+  #scale_x_continuous(n.breaks = 10)+
+    geom_hline(yintercept=0, linetype='dotted')+
+  ggtitle("Logit_Stan_SubArea_Length")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x=element_text(size = 10),
+        axis.text.y = element_text(size = 10))+
+  #scale_x_continuous(breaks = seq(1, 20, by = 5))+
+  theme(panel.spacing = unit(0.9, "lines"))+
+  theme(strip.text.x = element_text(size = 11))+
+  scale_y_continuous(breaks = c(-0.08, 0, 0.08),
+                     limits = c(-0.10,0.10)) +
+  scale_x_discrete(limits = c(1,5,10,15,20))
+  
+ 
+# 2 Centroid_lon
+dd <- summarise.data %>% 
+  mutate_at('Length', as.numeric) %>%
+  filter(Variables == "Centroid_lon")
+
+ggplot(data=dd, aes(x = Length,y = slope))+
+    geom_point(size = 0.7) + 
+    geom_errorbar(aes(ymin=lower_ci, ymax=upper_ci), width=.2,
+                 position=position_dodge(.9)) +
+    geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"))+
+  facet_grid(~Species, scales = "free")+
+  #scale_x_continuous(n.breaks = 10)+
+    geom_hline(yintercept=0, linetype='dotted')+
+  ggtitle("Centroid_lon")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x=element_text(size = 10),
+        axis.text.y = element_text(size = 10))+
+  #scale_x_continuous(breaks = seq(1, 20, by = 5))+
+  theme(panel.spacing = unit(0.9, "lines"))+
+  theme(strip.text.x = element_text(size = 11))+
+  scale_y_continuous(breaks = c(-0.10, 0, 0.10),
+                     limits = c(-0.15,0.15)) +
+  scale_x_discrete(limits = c(1,5,10,15,20))
+
+
+
+# 3 Centroid_lat
+dd <- summarise.data %>% 
+  mutate_at('Length', as.numeric) %>%
+  filter(Variables == "Centroid_lat")
+
+ggplot(data=dd, aes(x = Length,y = slope))+
+    geom_point(size = 0.7) + 
+    geom_errorbar(aes(ymin=lower_ci, ymax=upper_ci), width=.2,
+                 position=position_dodge(.9)) +
+    geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"))+
+  facet_grid(~Species, scales = "free")+
+  #scale_x_continuous(n.breaks = 10)+
+    geom_hline(yintercept=0, linetype='dotted')+
+  ggtitle("Centroid_lat")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x=element_text(size = 10),
+        axis.text.y = element_text(size = 10))+
+  #scale_x_continuous(breaks = seq(1, 20, by = 5))+
+  theme(panel.spacing = unit(0.9, "lines"))+
+  theme(strip.text.x = element_text(size = 11))+
+  scale_y_continuous(breaks = c(-0.10, 0, 0.10),
+                     limits = c(-0.15,0.15)) +
+  scale_x_discrete(limits = c(1,5,10,15,20))+
+  xlab("Length group")
+
+```
+
+
+#----------------Table 1 Model ------------------
+0. ts plot
+1. Detrend response variable by differencing
+2. Predictor:Remove colinearity by substracting mean (check)
+3. Fit the model and perform acf(resid(fit))
+4. Fit again the model with ARMA (gls or astsa)
+5. Decide the best ARMA using AIC (& check whitness)
+6. Parsimonious model for predictors 
+
+# Prepare data
+response use first difference
+explanatory use scaled, except cpue_length log transform
+```{r}
+
+# 1 Take first diff, create ar1
+cpue.length.year.ar <- cpue.length.year %>% 
+  mutate_at("Length", as.factor) %>% 
+  mutate_at("Num_SubArea_Length", as.numeric) %>% 
+  group_by(Species, Region,Length) %>%
+  # 1. AR subarea
+  mutate(ar1_area = lag(Stan_SubArea_Length),
+         diff_area = Stan_SubArea_Length - ar1_area,
+         ar2_area = lag(ar1_area),
+         ar3_area = lag(ar2_area),
+         ar4_area = lag(ar3_area)) %>% 
+  # 2. AR lon
+  mutate(ar1_lon = lag(Centroid_lon),
+         diff_lon = Centroid_lon - ar1_lon,
+         ar2_lon = lag(ar1_lon),
+         ar3_lon = lag(ar2_lon),
+         ar4_lon = lag(ar3_lon)) %>% 
+  # 3. AR lat
+  mutate(ar1_lat = lag(Centroid_lat),
+         diff_lat = Centroid_lat - ar1_lat,
+         ar2_lat = lag(ar1_lat),
+         ar3_lat = lag(ar2_lat),
+         ar4_lat = lag(ar3_lat)) %>% 
+  # ungroup
+  ungroup() %>% 
+  # 4. log CPUE_Length_Year
+  mutate(log_cpue = log(CPUE_Length_Year)) %>% 
+  # 5. Scale fishing, TSB
+  mutate(s_tsb = scale_this(TSB_Tonnes),
+         s_temp = scale_this(MeanBT),
+         s_fmor = scale_this(Fishing_Mortality)) %>% 
+  # Select variables
+  select(Species,Region,Length,
+         Stan_SubArea_Length,
+         ar1_area,diff_area,ar2_area,ar3_area, ar4_area,
+         ar1_lon, diff_lon, ar2_lon,ar3_lon, ar4_lon,
+         ar1_lat, diff_lat, ar2_lat,ar3_lat, ar4_lat,
+         log_cpue, s_tsb,s_temp,s_fmor) 
+  
+  
+cpue.length.year.ar
+
+```
+
+
+# Functions
+```{r}
+
+# check_ar_range
+check_ar_range <- function(dd){
+  mm1<-lm(diff_area ~  ar1_area, dd,
+        na.action = na.omit)
+  mm2<-lm(diff_area ~  ar1_area + ar2_area ,
+        dd, na.action = na.omit)
+  mm3<-lm(diff_area ~ ar1_area + ar2_area +
+        ar3_area, dd, na.action = na.omit)
+  mm4<-lm(diff_area ~  ar1_area + ar2_area +
+          ar3_area + ar4_area, dd, na.action = na.omit)
+  mm1 <- c(summary(mm1)$ adj.r.squared, AIC(mm1))
+  mm2 <- c(summary(mm2)$ adj.r.squared, AIC(mm2))
+  mm3 <- c(summary(mm3)$ adj.r.squared, AIC(mm3))
+  mm4 <- c(summary(mm4)$ adj.r.squared, AIC(mm4))
+  list(mm1,mm2,mm3,mm4)
+  
+}
+
+# check_ar_lon
+check_ar_lon <- function(dd){
+  mm1<-lm(diff_lon ~  ar1_lon, dd,
+        na.action = na.omit)
+  mm2<-lm(diff_lon ~  ar1_lon + ar2_lon ,
+        dd, na.action = na.omit)
+  mm3<-lm(diff_lon ~ ar1_lon + ar2_lon +
+        ar3_lon, dd, na.action = na.omit)
+  mm4<-lm(diff_lon ~  ar1_lon + ar2_lon +
+          ar3_lon + ar4_lon, dd, na.action = na.omit)
+  mm1 <- c(summary(mm1)$ adj.r.squared, AIC(mm1))
+  mm2 <- c(summary(mm2)$ adj.r.squared, AIC(mm2))
+  mm3 <- c(summary(mm3)$ adj.r.squared, AIC(mm3))
+  mm4 <- c(summary(mm4)$ adj.r.squared, AIC(mm4))
+  list(mm1,mm2,mm3,mm4)
+  
+  }
+
+
+# check_ar_lat
+check_ar_lat <- function(dd){
+  mm1<-lm(diff_lat ~  ar1_lat, dd,
+        na.action = na.omit)
+  mm2<-lm(diff_lat ~  ar1_lat + ar2_lat ,
+        dd, na.action = na.omit)
+  mm3<-lm(diff_lat ~ ar1_lat + ar2_lat +
+        ar3_lat, dd, na.action = na.omit)
+  mm4<-lm(diff_lat ~  ar1_lat + ar2_lat +
+          ar3_lat + ar4_lat, dd, na.action = na.omit)
+  mm1 <- c(summary(mm1)$ adj.r.squared, AIC(mm1))
+  mm2 <- c(summary(mm2)$ adj.r.squared, AIC(mm2))
+  mm3 <- c(summary(mm3)$ adj.r.squared, AIC(mm3))
+  mm4 <- c(summary(mm4)$ adj.r.squared, AIC(mm4))
+  list(mm1,mm2,mm3,mm4)
+  
+  }
+
+
+# Build tibble
+m.tibble <- function(model,col1,col2,
+                      species,response){
+  columns <- anova(model)[c(col1:col2),c(1:5)]
+  Explanatory <- rownames(columns)
+  R_square <- summary(model)$adj.r
+  tibble(Species = species, 
+         Response = response,
+         Explanatory, columns, R_square)
+  }
+
+
+```
+
+# Trial
+```{r}
+
+# Remove rows with na
+dd.na <- dd %>% drop_na(x, all_of(x))
+
+# autotorrelation 
+m<- lm(diff_area ~ ar1_area + ar2_area + ar3_area +
+     ar4_area, dd, na.action = na.exclude)
+anova(m)
+area_rauto <-residuals (m)
+length(r_area)
+
+# Partial Y
+m <- lm(r_area ~ s_temp, dd, na.action = na.exclude)
+area_rauto_rtemp <- residuals(m)
+length(area_rauto_rtemp)
+
+# Partial tsb
+m <- lm(s_tsb ~ s_temp, dd, na.action = na.exclude)
+tsb_rtemp <- residuals (m)
+length(tsb_rtemp)
+
+# Partial temp
+m <- lm(s_temp ~ s_tsb, dd, na.action = na.exclude)
+temp_rtsb <- residuals(m)
+
+# Model
+m <- lm(area_rauto_rtemp ~ dd$Length * tsb_rtemp )
+
+m <- lm(area_rauto_rtemp ~ dd$log_cpue + tsb_rtemp)
+
+m<- lm(area_rauto_rtemp ~ dd$Length * temp_rtsb)
+
+
+m <- lm(dd$diff_area ~ dd$s_tsb + dd$s_temp)
+vif(m)
+anova(m)
+summary(m)
+dd
+
+
+dd
+length(dd$Length)
+cor.test(dd$log_cpue, dd$s_tsb) 
+cor.test(dd$s_temp, dd$s_tsb)
+
+
+# Different order results in different outputs
+dd <- cpue.length.year.ar %>% 
+  filter(Species == "Atlantic cod")
+
+mf.cod.range <- lm(diff_area ~ 
+     ar1_area + ar2_area + ar3_area + ar4_area +
+       Length * s_tsb + Length * s_temp, dd)
+vif(mf.cod.range)
+summary(mf.cod.range)
+anova(mf.cod.range)
+
+
+mf.cod.range <- lm(diff_area ~ 
+     ar1_area + ar2_area + ar3_area + ar4_area +
+       Length * s_temp + Length * s_tsb, dd)
+vif(mf.cod.range)
+anova(mf.cod.range)
+
+
+```
+
+
+
+
+
+# Cod, individual range size
+fit 4 ar, choose best.
+correlation test of fishing & temp
+when highly correlated, fit in separate models.
+```{r}
+
+dd <- cpue.length.year.ar %>% 
+  filter(Species == "Atlantic cod")
+
+# Check AR with full dataset using AIC and R2
+check_ar_range(dd)
+
+# Correlation between temp & TSB
+cor.test(dd$s_tsb,dd$s_temp) # -0.44
+cor.test(dd$s_fmor,dd$s_temp) # -0.3
+cor.test(dd$s_fmor,dd$s_tsb) # 0.47
+
+# 1 Fit model with tsb
+mf.cod.range <- lm(diff_area ~ 
+     ar1_area + ar2_area + ar3_area + ar4_area +
+     log_cpue + Length * s_tsb, dd)
+vif(mf.cod.range)
+summary(mf.cod.range)
+anova(mf.cod.range)
+
+mf.cod.range.tibble <- 
+  m.tibble(mf.cod.range,6,8,"Atlantic cod","range")
+
+
+# 2 Fit full model with temp
+mt <- lm(diff_area ~ 
+     ar1_area + ar2_area + ar3_area + ar4_area +
+     log_cpue + Length * s_temp, dd)
+vif(mt)
+step(mt)
+
+mt.cod.range <- lm(diff_area ~ 
+     ar1_area + ar2_area + ar3_area + ar4_area +
+     log_cpue + Length , dd)
+vif(mt.cod.range)
+anova(mt.cod.range)
+summary(mt.cod.range)
+
+mt.cod.range.tibble <- 
+  m.tibble(mt.cod.range,6,6,"Atlantic cod","range")
+
+cod.range.tibble <- 
+  rbind(mf.cod.range.tibble, mt.cod.range.tibble)     
+
+#------------AR1----------------
+# mf
+mf.cod.range1 <- lm(diff_area ~ 
+     ar1_area +
+     log_cpue + Length * s_tsb, dd)
+vif(mf.cod.range1)
+summary(mf.cod.range1)
+anova(mf.cod.range1)
+
+(mf.cod.range.tibble.ar <- 
+  m.tibble(mf.cod.range1,2,5,"Atlantic cod","range"))
+
+# mt
+mt1 <- lm(diff_area ~ 
+     ar1_area +
+     log_cpue + Length * s_temp, dd)
+vif(mt1)
+step(mt1)
+
+mt.cod.range1 <- lm(diff_area ~ 
+     ar1_area + 
+     log_cpue + Length , dd)
+vif(mt.cod.range1)
+anova(mt.cod.range1)
+summary(mt.cod.range1)
+(mt.cod.range.tibble.ar <- 
+  m.tibble(mt.cod.range1,2,3,"Atlantic cod","range"))
+
+# mm (fishing mortality)
+mm.cod.range1 <- lm(diff_area ~ 
+     ar1_area +
+     log_cpue + Length * s_fmor, dd)
+vif(mm.cod.range1)
+summary(mm.cod.range1)
+anova(mm.cod.range1)
+
+
+
+```
+
+
+# Cod, longitudinal centroid
+Not include log_cpue at the global model
+```{r}
+
+dd <- cpue.length.year.ar %>% 
+  filter(Species == "Atlantic cod")
+
+# Check AR with full dataset using AIC and R2
+check_ar_lon(dd)
+
+# Correlation between temp & TSB
+## When highly correlated, fit seperate models
+cor.test(cpue.length.year.ar$s_tsb,cpue.length.year.ar$s_temp)
+
+# 1 Fit full model with tsb
+mf <- lm(diff_lon ~ 
+     ar1_lon + ar2_lon + ar3_lon + ar4_lon +
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mf)
+anova(mf)
+
+mf1 <- update(mf,~.-Length:s_tsb)
+anova(mf,mf1)
+anova(mf1)
+summary(mf1)
+mf2 <- update(mf1,~.-s_tsb)
+anova(mf2)
+summary(mf2)
+AIC(mf)
+AIC(mf1)
+AIC(mf2)
+mf.cod.lon <- mf2
+
+(mf.cod.lon.tibble <- 
+  m.tibble(mf.cod.lon,5,5,"Atlantic cod","Lon"))
+
+
+# 2 Fit full model with temp
+mt <- lm(diff_lon ~ 
+     ar1_lon + ar2_lon + ar3_lon + ar4_lon +
+     Length * s_temp, dd, na.action = na.omit)
+vif(mt)
+summary(mt)
+anova(mt)
+mt1 <- update(mt,~.-Length:s_temp)
+anova(mt,mt1)
+anova(mt1)
+mt2 <- update(mt1,~.-s_temp)
+anova(mt2)
+summary(mt2)
+mt.cod.lon <- mt2
+
+(mt.cod.lon.tibble <- 
+  m.tibble(mt.cod.lon,5,5,"Atlantic cod","Lon"))
+
+cod.lon.tibble <- 
+  rbind(mf.cod.lon.tibble, mt.cod.lon.tibble)       
+
+
+#--------AR1
+#mf
+mfar <- lm(diff_lon ~ 
+     ar1_lon + 
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mfar)
+anova(mfar)
+
+mf1ar <- update(mfar,~.-Length:s_tsb)
+anova(mfar,mf1ar)
+anova(mf1ar)
+summary(mf1ar)
+mf2ar <- update(mf1ar,~.-s_tsb)
+anova(mf2ar)
+summary(mf2ar)
+AIC(mfar)
+AIC(mf1ar)
+AIC(mf2ar)
+mf.cod.lon <- mf2ar
+
+(mf.cod.lon.tibble.ar <- 
+  m.tibble(mf.cod.lon,2,2,"Atlantic cod","Lon"))
+
+#mt
+#@ Results different from AR4.
+mtar <- lm(diff_lon ~ 
+     ar1_lon + 
+     Length * s_temp, dd, na.action = na.omit)
+vif(mtar)
+summary(mtar)
+anova(mtar)
+mt.cod.lon <- mtar
+
+(mt.cod.lon.tibble.ar <- 
+  m.tibble(mt.cod.lon,2,4,"Atlantic cod","Lon"))
+
+```
+
+
+# Cod, latitudinal centroid
+Not include log_cpue at the global model 
+```{r}
+
+dd <- cpue.length.year.ar %>% 
+  filter(Species == "Atlantic cod")
+
+# Check AR with full dataset using AIC and R2
+check_ar_lat(dd)
+
+# Correlation between temp & TSB
+cor.test(cpue.length.year.ar$s_tsb,cpue.length.year.ar$s_temp)
+
+# 1 Fit full model with tsb
+mf <- lm(diff_lat ~ 
+     ar1_lat + ar2_lat + ar3_lat + ar4_lat +
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mf)
+anova(mf)
+step(mf)
+
+mf1 <- update(mf,~.-Length:s_tsb)
+anova(mf,mf1)
+anova(mf1)
+summary(mf1)
+mf.cod.lat <- mf1
+
+mf.cod.lat.tibble <- m.tibble(mf.cod.lat,5,6,"Atlantic cod","Lat")
+
+
+# 2 Fit full model with temp
+mt <- lm(diff_lat ~ 
+     ar1_lat + ar2_lat + ar3_lat + ar4_lat +
+     Length * s_temp, dd, na.action = na.omit)
+
+vif(mt)
+summary(mt)
+anova(mt)
+mt1 <- update(mt,~.-Length:s_temp)
+anova(mt,mt1)
+anova(mt1)
+summary(mt1)
+mt.cod.lat <- mt1
+
+mt.cod.lat.tibble <- 
+  m.tibble(mt.cod.lat,5,6,"Atlantic cod","Lat")
+
+
+#----------AR1
+# mf
+mfar <- lm(diff_lat ~ 
+     ar1_lat + 
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mfar)
+anova(mfar)
+step(mfar)
+
+mf1ar <- update(mfar,~.-Length:s_tsb)
+anova(mfar,mf1ar)
+anova(mf1ar)
+summary(mf1ar)
+mf.cod.lat.ar <- mf1ar
+
+(mf.cod.lat.tibble.ar <- m.tibble(mf.cod.lat.ar,2,3,"Atlantic cod","Lat"))
+
+# mt
+mtar <- lm(diff_lat ~ 
+     ar1_lat +
+     Length * s_temp, dd, na.action = na.omit)
+
+vif(mtar)
+summary(mtar)
+anova(mtar)
+mt1ar <- update(mtar,~.-Length:s_temp)
+anova(mtar,mt1ar)
+anova(mt1ar)
+summary(mt1ar)
+mt.cod.lat.ar <- mt1ar
+
+(mt.cod.lat.tibble.ar <- 
+  m.tibble(mt.cod.lat.ar,2,3,"Atlantic cod","Lat"))
+
+```
+
+
+# Haddock, individual range size
+```{r}
+
+dd <- cpue.length.year.ar %>% 
+  filter(Species == "Haddock")
+
+# Check AR with full dataset using AIC and R2
+check_ar_range(dd)
+
+# Correlation between temp & TSB
+cor.test(dd$s_tsb,dd$s_temp) # -0.33
+cor.test(dd$s_fmor,dd$s_temp) # -0.32
+cor.test(dd$s_fmor,dd$s_tsb) # 0.52
+
+# 1 Fit model with tsb
+mf <- lm(diff_area ~ 
+     ar1_area + ar2_area + 
+     log_cpue + Length * s_tsb, dd)
+summary(mf)
+anova(mf)
+step(mf)
+
+mf1 <- lm(diff_area ~ 
+     ar1_area + ar2_area +
+     log_cpue + Length + s_tsb, dd)
+anova(mf1)
+summary(mf1)
+vif(mf1)
+mf.had.range <- mf1
+
+mf.had.range.tibble <- 
+  m.tibble(mf.had.range,4,5,"Haddock","range")
+
+
+# 2 Fit full model with temp
+mt <- lm(diff_area ~ 
+     ar1_area + ar2_area +
+     log_cpue + Length * s_temp, dd)
+anova(mt)
+vif(mt)
+step(mt)
+
+mt1 <- lm(diff_area ~ 
+     ar1_area + ar2_area + 
+     log_cpue + Length + s_temp , dd)
+vif(mt1)
+anova(mt1)
+summary(mt1)
+mt.had.range <- mt1
+
+
+mt.had.range.tibble <- 
+  m.tibble(mt.had.range,4,5,"Haddock","range")
+
+had.range.tibble <- 
+  rbind(mf.had.range.tibble, mt.had.range.tibble)     
+
+#----------AR
+# mf
+mfar <- lm(diff_area ~ 
+     ar1_area + 
+     log_cpue + Length * s_tsb, dd)
+summary(mfar)
+anova(mfar)
+step(mfar)
+
+mf1ar <- lm(diff_area ~ 
+     ar1_area + 
+     log_cpue + Length + s_tsb, dd)
+anova(mf1ar)
+summary(mf1ar)
+vif(mf1ar)
+mf.had.range.ar <- mf1ar
+
+(mf.had.range.tibble.ar <- 
+  m.tibble(mf.had.range.ar,2,4,"Haddock","range"))
+
+
+# mt
+mtar <- lm(diff_area ~ 
+     ar1_area + 
+     log_cpue + Length * s_temp, dd)
+anova(mtar)
+vif(mtar)
+step(mtar)
+
+mt1ar <- lm(diff_area ~ 
+     ar1_area + 
+     log_cpue + Length + s_temp , dd)
+vif(mt1ar)
+anova(mt1ar)
+summary(mt1ar)
+mt.had.range.ar <- mt1ar
+
+
+(mt.had.range.tibble.ar <- 
+  m.tibble(mt.had.range.ar,2,4,"Haddock","range"))
+
+# mm
+mmar <- lm(diff_area ~ 
+     ar1_area + 
+     log_cpue + Length + s_fmor, dd)
+summary(mmar)
+anova(mmar)
+step(mmar)
+
+```
+
+
+# Haddock, longitudinal centroid
+Not include log_cpue at the global model
+```{r}
+
+dd <- cpue.length.year.ar %>% 
+  filter(Species == "Haddock")
+
+# Check AR with full dataset using AIC and R2
+check_ar_lon(dd)
+
+# 1 Fit full model with tsb
+mf <- lm(diff_lon ~ 
+     ar1_lon + ar2_lon + ar3_lon + ar4_lon +
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mf)
+anova(mf)
+
+mf1 <- update(mf,~.-Length:s_tsb)
+anova(mf,mf1)
+anova(mf1)
+summary(mf1)
+mf2 <- update(mf1,~.-s_tsb)
+anova(mf2)
+summary(mf2)
+AIC(mf)
+AIC(mf1)
+AIC(mf2)
+mf.had.lon <- mf2
+
+mf.had.lon.tibble <- 
+  m.tibble(mf.had.lon,5,5,"Haddock","Lon")
+
+
+# 2 Fit full model with temp
+mt <- lm(diff_lon ~ 
+     ar1_lon + ar2_lon + ar3_lon + ar4_lon +
+     Length * s_temp, dd, na.action = na.omit)
+vif(mt)
+summary(mt)
+anova(mt)
+mt1 <- update(mt,~.-Length:s_temp)
+anova(mt,mt1)
+anova(mt1)
+summary(mt1)
+mt.had.lon <- mt1
+
+mt.had.lon.tibble <- 
+  m.tibble(mt.had.lon,5,6,"Haddock","Lon")
+
+had.lon.tibble <- 
+  rbind(mf.had.lon.tibble, mt.had.lon.tibble)       
+
+#---------AR
+# mf
+mfar <- lm(diff_lon ~ 
+     ar1_lon + 
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mfar)
+anova(mfar)
+
+mf1ar <- update(mfar,~.-Length:s_tsb)
+anova(mfar,mf1ar)
+anova(mf1ar)
+summary(mf1ar)
+mf2ar <- update(mf1ar,~.-s_tsb)
+anova(mf2ar)
+summary(mf2ar)
+mf.had.lon.ar <- mf2ar
+
+(mf.had.lon.tibble.ar <- 
+  m.tibble(mf.had.lon.ar,2,2,"Haddock","Lon"))
+
+
+# mt
+mtar <- lm(diff_lon ~ 
+     ar1_lon + 
+     Length * s_temp, dd, na.action = na.omit)
+vif(mtar)
+summary(mtar)
+anova(mtar)
+mt1ar <- update(mtar,~.-Length:s_temp)
+anova(mtar,mt1ar)
+anova(mt1ar)
+summary(mt1ar)
+mt.had.lon.ar <- mt1ar
+
+(mt.had.lon.tibble.ar <- 
+  m.tibble(mt.had.lon.ar,2,3,"Haddock","Lon"))
+
+```
+
+
+# Haddock, latitudinal centroid
+Not include log_cpue at the global model
+```{r}
+
+dd <- cpue.length.year.ar %>% 
+  filter(Species == "Haddock")
+
+# Check AR with full dataset using AIC and R2
+check_ar_lat(dd)
+
+
+# 1 Fit full model with tsb
+mf <- lm(diff_lat ~ 
+     ar1_lat + ar2_lat + ar3_lat + ar4_lat +
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mf)
+anova(mf)
+
+
+mf1 <- update(mf,~.-Length:s_tsb)
+anova(mf,mf1)
+anova(mf1)
+mf2<- update(mf1,~.-s_tsb)
+summary(mf2)
+anova(mf2)
+mf.had.lat <- mf2
+
+mf.had.lat.tibble <- m.tibble(mf.had.lat,5,5,"Haddock","Lat")
+
+
+# 2 Fit full model with temp
+mt <- lm(diff_lat ~ 
+     ar1_lat + ar2_lat + ar3_lat + ar4_lat +
+     Length * s_temp, dd, na.action = na.omit)
+vif(mt)
+summary(mt)
+anova(mt)
+mt1 <- update(mt,~.-Length:s_temp)
+anova(mt,mt1)
+anova(mt1)
+summary(mt1)
+mt.had.lat <- mt1
+
+mt.had.lat.tibble <- 
+  m.tibble(mt.had.lat,5,6,"Haddock","Lat")
+            
+had.lat.tibble <- rbind(mf.had.lat.tibble,
+                   mt.had.lat.tibble)       
+
+#----------AR
+# 1 Fit full model with tsb
+mfar <- lm(diff_lat ~ 
+     ar1_lat + 
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mfar)
+anova(mfar)
+
+
+mf1ar <- update(mfar,~.-Length:s_tsb)
+anova(mfar,mf1ar)
+anova(mf1ar)
+mf2ar<- update(mf1ar,~.-s_tsb)
+summary(mf2ar)
+anova(mf2ar)
+mf.had.lat.ar <- mf2ar
+
+(mf.had.lat.tibble.ar <- m.tibble(mf.had.lat.ar,2,2,"Haddock","Lat"))
+
+
+# 2 Fit full model with temp
+#@ results different from AR4
+#@ in summary, temp only influence large groups
+mtar <- lm(diff_lat ~ 
+     ar1_lat +
+     Length * s_temp, dd, na.action = na.omit)
+vif(mtar)
+summary(mtar)
+anova(mtar)
+mt.had.lat.ar <- mtar
+
+(mt.had.lat.tibble.ar <- 
+  m.tibble(mt.had.lat.ar,2,4,"Haddock","Lat"))
+
+```
+
+
+# Whiting, individual range size
+```{r}
+
+dd <- cpue.length.year.ar %>% 
+  filter(Species == "Whiting")
+
+# Check AR with full dataset using AIC and R2
+check_ar_range(dd)
+
+# correlation
+cor.test(dd$s_tsb,dd$s_temp) # -0.16
+cor.test(dd$s_fmor,dd$s_temp) # -0.23
+cor.test(dd$s_fmor,dd$s_tsb) # 0.67
+
+# 1 Fit model with tsb
+mf <- lm(diff_area ~ 
+     ar1_area + ar2_area +
+     log_cpue + Length * s_tsb, dd)
+summary(mf)
+anova(mf)
+step(mf)
+
+mf1 <- lm(diff_area ~ 
+     ar1_area + ar2_area +
+     log_cpue + Length + s_tsb, dd)
+anova(mf1)
+summary(mf1)
+vif(mf1)
+mf.whi.range <- mf1
+
+mf.whi.range.tibble <- 
+  m.tibble(mf.whi.range,4,5,"Whiting","range")
+
+
+# 2 Fit full model with temp
+mt <- lm(diff_area ~ 
+     ar1_area + ar2_area +
+     log_cpue + Length * s_temp, dd)
+anova(mt)
+vif(mt)
+step(mt)
+
+mt1 <- lm(diff_area ~ 
+     ar1_area + ar2_area + 
+     log_cpue + Length + s_temp , dd)
+vif(mt1)
+anova(mt1)
+summary(mt1)
+AIC(mt)
+AIC(mt1)
+anova(mt)
+summary(mt)
+mt.whi.range <- mt # include interaction term
+
+
+mt.whi.range.tibble <- 
+  m.tibble(mt.whi.range,4,6,"Whiting","range")
+
+whi.range.tibble <- 
+  rbind(mf.whi.range.tibble, mt.whi.range.tibble)     
+
+#-----------AR
+# mf
+mfar <- lm(diff_area ~ 
+     ar1_area +
+     log_cpue + Length * s_tsb, dd)
+summary(mfar)
+anova(mfar)
+step(mfar)
+
+mf1ar <- lm(diff_area ~ 
+     ar1_area + 
+     log_cpue + Length + s_tsb, dd)
+anova(mf1ar)
+summary(mf1ar)
+vif(mf1ar)
+mf.whi.range.ar <- mf1ar
+
+(mf.whi.range.tibble.ar <- 
+  m.tibble(mf.whi.range.ar,2,4,"Whiting","range"))
+
+
+# mt
+mtar <- lm(diff_area ~ 
+     ar1_area + 
+     log_cpue + Length * s_temp, dd)
+anova(mtar)
+summary(mtar)
+vif(mtar)
+step(mtar)
+mt.whi.range.ar <- mtar
+
+mt.whi.range.tibble.ar <- 
+  m.tibble(mt.whi.range.ar,2,5,"Whiting","range")
+
+
+# mm
+mm <- lm(diff_area ~ 
+     ar1_area + ar2_area +
+     log_cpue + Length + s_fmor, dd)
+summary(mm)
+anova(mm)
+
+
+```
+
+
+# Whiting, longitudinal centroid
+Not include log_cpue at the global model
+```{r}
+
+dd <- cpue.length.year.ar %>% 
+  filter(Species == "Whiting")
+
+# Check AR with full dataset using AIC and R2
+check_ar_lon(dd)
+
+# 1 Fit full model with tsb
+mf <- lm(diff_lon ~ 
+     ar1_lon + ar2_lon + ar3_lon + ar4_lon +
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mf)
+anova(mf)
+
+mf1 <- update(mf,~.-Length:s_tsb)
+anova(mf,mf1)
+anova(mf1)
+summary(mf1)
+mf2 <- update(mf1,~.-s_tsb)
+anova(mf2)
+summary(mf2)
+mf.whi.lon <- mf2
+
+mf.whi.lon.tibble <- 
+  m.tibble(mf.whi.lon,5,5,"Whiting","Lon")
+
+
+# 2 Fit full model with temp
+mt <- lm(diff_lon ~ 
+     ar1_lon + ar2_lon + ar3_lon + ar4_lon +
+     Length * s_temp, dd, na.action = na.omit)
+vif(mt)
+summary(mt)
+anova(mt)
+mt.whi.lon <- mt
+
+mt.whi.lon.tibble <- 
+  m.tibble(mt.whi.lon,5,7,"Whiting","Lon")
+
+whi.lon.tibble <- 
+  rbind(mf.whi.lon.tibble, mt.whi.lon.tibble)  
+
+
+#------------AR
+# mf
+mfar <- lm(diff_lon ~ 
+     ar1_lon + 
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mfar)
+anova(mfar)
+
+mf1ar <- update(mfar,~.-Length:s_tsb)
+anova(mfar,mf1ar)
+anova(mf1ar)
+summary(mf1ar)
+mf2ar <- update(mf1ar,~.-s_tsb)
+anova(mf2ar)
+summary(mf2ar)
+mf.whi.lon.ar <- mf2ar
+
+(mf.whi.lon.tibble.ar <- 
+  m.tibble(mf.whi.lon.ar,2,2,"Whiting","Lon"))
+
+
+# mt
+mtar <- lm(diff_lon ~ 
+     ar1_lon + 
+     Length * s_temp, dd, na.action = na.omit)
+vif(mtar)
+summary(mtar)
+anova(mtar)
+mt.whi.lon.ar <- mtar
+
+(mt.whi.lon.tibble.ar <- 
+  m.tibble(mt.whi.lon.ar,2,4,"Whiting","Lon"))
+
+```
+
+
+# Whiting, latitudinal centroid
+Not include log_cpue at the global model
+```{r}
+
+dd <- cpue.length.year.ar %>% 
+  filter(Species == "Whiting")
+
+# Check AR with full dataset using AIC and R2
+check_ar_lat(dd)
+
+
+# 1 Fit full model with tsb
+mf <- lm(diff_lat ~ 
+     ar1_lat + ar2_lat + ar3_lat + ar4_lat +
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mf)
+anova(mf)
+
+
+mf1 <- update(mf,~.-Length:s_tsb)
+anova(mf,mf1)
+anova(mf1)
+mf2<- update(mf1,~.-s_tsb)
+summary(mf2)
+anova(mf2)
+mf.whi.lat <- mf2
+
+mf.whi.lat.tibble <- m.tibble(mf.whi.lat,5,5,"Whiting","Lat")
+
+
+# 2 Fit full model with temp
+mt <- lm(diff_lat ~ 
+     ar1_lat + ar2_lat + ar3_lat + ar4_lat +
+     Length * s_temp, dd, na.action = na.omit)
+vif(mt)
+summary(mt)
+anova(mt)
+
+mt.whi.lat <- mt
+
+mt.whi.lat.tibble <- 
+  m.tibble(mt.whi.lat,5,7,"Whiting","Lat")
+            
+whi.lat.tibble <- rbind(mf.whi.lat.tibble,
+                   mt.whi.lat.tibble)       
+
+#--------------AR
+# mf
+mfar <- lm(diff_lat ~ 
+     ar1_lat + 
+     Length * s_tsb,dd,
+     na.action = na.omit)
+vif(mfar)
+anova(mfar)
+
+
+mf1ar <- update(mfar,~.-Length:s_tsb)
+anova(mfar,mf1ar)
+anova(mf1ar)
+summary(mf1ar)
+mf2ar<- update(mf1ar,~.-s_tsb)
+summary(mf2ar)
+anova(mf2ar)
+mf.whi.lat.ar <- mf2ar
+
+(mf.whi.lat.tibble.ar <- m.tibble(mf.whi.lat.ar,2,2,"Whiting","Lat"))
+
+
+# mt
+mtar <- lm(diff_lat ~ 
+     ar1_lat + 
+     Length * s_temp, dd, na.action = na.omit)
+vif(mtar)
+summary(mtar)
+anova(mtar)
+
+mt.whi.lat.ar <- mtar
+
+(mt.whi.lat.tibble.ar <- 
+  m.tibble(mt.whi.lat.ar,2,4,"Whiting","Lat"))
+            
+```
+
+# Statistic summary AR1
+```{r}
+
+stat.summary.ar1 <-rbind(
+mt.cod.range.tibble.ar,
+mf.cod.range.tibble.ar,
+mt.cod.lon.tibble.ar1,
+mf.cod.lon.tibble.ar1,
+mt.cod.lat.tibble.ar,
+mf.cod.lat.tibble.ar,
+mt.had.range.tibble.ar,
+mf.had.range.tibble.ar,
+mt.had.lon.tibble.ar,
+mf.had.lon.tibble.ar,
+mt.had.lat.tibble.ar,
+mf.had.lat.tibble.ar,
+mt.whi.range.tibble.ar,
+mf.whi.range.tibble.ar,
+mt.whi.lon.tibble.ar,
+mf.whi.lon.tibble.ar,
+mt.whi.lat.tibble.ar,
+mf.whi.lat.tibble.ar
+)
+
+write.csv (stat.summary.ar1, file = "stat.summary.ar1.csv")
+
+```
+
+
+# Plot cod subarea model 
+```{r}
+dd
+ggplot(dd, aes(y = Stan_SubArea_Length, x = s_tsb, color = Length))+
+  geom_smooth(method = "lm", se =  F)+
+  geom_point()+ xlim(2,-2)+
+  scale_colour_viridis_d()+ theme
+
+ggplot(dd, aes(y = Stan_SubArea_Length, 
+               x = s_temp, color = Length))+
+  geom_point()+ theme+
+  scale_colour_viridis_d()+
+  geom_smooth(method = "lm", se =  F,
+              color = "black",lty = 2)
+  
+
+```
+
+
+
+
+# Cod,distribution range_trials
+```{r}
+
+cpue.length.cod <-
+  cpue.length.year %>% 
+  filter(Species == "Atlantic cod")
+
+dd <- cpue.length.cod
+
+
+# Plot non-transformed and transformed variables
+## Response variable
+plot(dd$Num_SubArea_Length ~ dd$Year)
+plot(dd$Centroid_lon~ dd$Year)
+plot(dd$Centroid_lat~ dd$Year)
+
+## Predictor
+### log transform cpue
+plot(dd$CPUE_Length_Year ~ dd $Year)
+plot(log(dd$CPUE_Length_Year) ~ dd $Year) 
+plot(dd$Fishing_Mortality ~ dd$Year)
+plot(dd$MeanBT_scale ~ dd$Year)
+plot(dd$TSB_Tonnes ~ dd$Year)
+
+## Transformed variables
+plot(dd$Diff_Num_SubArea_Length ~ dd$Year)
+plot(dd$Diff_Centroid_lon~ dd$Year)
+plot(dd$Diff_Centroid_lat~ dd$Year)
+plot(dd$CPUE_Length_Year_scale_log ~ dd $Year)
+plot(dd$Fishing_Mortality_scale ~ dd$Year)
+plot(dd$MeanBT_scale ~ dd$Year)
+plot(dd$TSB_Tonnes_scale ~ dd$Year)
+
+# 5 Check colinearity of predictors
+dd <- dd %>% 
+  ungroup() %>% 
+  select(Year,Length, Diff_Num_SubArea_Length,
+         Diff_Centroid_lon,Diff_Centroid_lat,
+         CPUE_Length_Year_scale_log,
+         Fishing_Mortality_scale,
+         MeanBT_scale, TSB_Tonnes_scale) %>% 
+  mutate_at("Length", as.factor)
+
+pairs(dd[,6:7])
+cor.test(dd$Diff_Centroid_lon,dd$MeanBT_scale)
+
+library(PerformanceAnalytics)
+chart.Correlation(dd[,3:9], histogram=TRUE, pch=19)
+cor.test(dd$MeanBT_scale, dd$TSB_Tonnes_scale)
+## The highest correlation coefficient isx ~0.5
+## It seems that it is not too high, so I can still fit
+## all predictors as its original forms.
+
+
+m<- lm(Diff_Num_SubArea_Length ~ 
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale, dd)
+
+anova(m)
+library(car)
+vif(m)
+
+## vif of two predictors are at the border line,
+## but it is still ok to fit the original form.
+
+# 6 Fit AR and select best AR
+## 6.1 acf of residuals of fitted full model
+
+acf(resid(m)) # indicate AR1
+acf(residuals(m),type = "partial",na.action = na.omit) #indicate AR1
+library(astsa)
+
+## 6.2 acf of response variable without predictors
+acf(dd$Diff_Num_SubArea_Length, na.action = na.omit) #indicate AR1
+
+m0 <- gls(Diff_Num_SubArea_Length~1,dd, na.action = na.omit)
+m1 <- gls(Diff_Num_SubArea_Length~Length,dd, na.action = na.omit,
+          correlation =corARMA(form = ~Year|Length, p=1))
+m2 <- gls(Diff_Num_SubArea_Length~1,dd, na.action = na.omit,
+          correlation =corARMA(form = ~Year|Length, p=2))
+m3 <- gls(Diff_Num_SubArea_Length~1,dd, na.action = na.omit,
+          correlation =corARMA(form = ~Year|Length, p=3))
+m21 <- gls(Diff_Num_SubArea_Length~1,dd, na.action = na.omit,
+          correlation =corARMA(form = ~Year|Length, p=2,q = 1))
+acf(resid(m21))
+
+anova(m0,m1,m2,m3,m21) # for AIC, AR2 seems to be the best
+
+sarima(dd$Diff_Num_SubArea_Length,1,0,0) # AR1
+sarima(dd$Diff_Num_SubArea_Length,2,0,0) # AR2 is better than AR1
+
+sarima(dd$Diff_Num_SubArea_Length,2,0,0,xreg = 
+         cbind(dd$CPUE_Length_Year_scale_log, 
+               dd$TSB_Tonnes_scale,
+               dd$MeanBT_scale))
+
+sarima(dd$Diff_Num_SubArea_Length,2,1,1,xreg = 
+         cbind(dd$CPUE_Length_Year_scale_log, 
+               dd$TSB_Tonnes_scale,
+               dd$MeanBT_scale))
+
+
+# 7 Fit selected AR and all predictors
+dd<- dd %>% 
+  mutate_at("Year", as.numeric) %>% 
+  mutate_at("Length", as.factor)
+
+
+mf0<- gls(Diff_Num_SubArea_Length ~ 
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale, 
+     dd, na.action = na.omit)
+
+mf1_nogroup <- update(mf0,correlation = 
+                corARMA(p = 1, q = 0))
+
+
+mf1 <- update(mf0,correlation = 
+                corARMA(form = ~ Year | Length , 
+                        p = 1, q = 0))
+
+mf2 <- update(mf0,correlation = corARMA(form = ~ Year | Length , p = 2, q = 0))
+
+
+anova(mf0)
+summary(mf0)
+anova(mf1)
+summary(mf1)
+anova(mf2)
+summary(mf2)
+AIC(mf0,mf1,mf1_nogroup,mf2)
+
+
+plot(resid(mf0),fitted(mf0))
+plot(resid(mf1),fitted(mf1))
+plot(resid(mf1_nogroup),fitted(mf1_nogroup))
+plot(resid(mf2),fitted(mf2))
+
+
+# 8 Parsimonious model
+## 8.1 with AR1
+anova(mf1)
+mf1.1 <-update(mf1,~.- Length:MeanBT_scale)
+anova(mf1.1)
+mf1.2 <- update(mf1.1,~.-Length:TSB_Tonnes_scale)
+anova(mf1.2)
+mf1.3 <- update(mf1.2,~.-MeanBT_scale)
+anova(mf1.3)
+
+sarima(dd$Diff_Num_SubArea_Length,2,0,0,xreg = 
+         cbind(dd$CPUE_Length_Year_scale_log, 
+               dd$TSB_Tonnes_scale))
+
+## 8.2 with AR2
+anova(mf2)
+mf2.1<-update(mf2,~.-Length:TSB_Tonnes_scale)
+anova(mf2.1)
+mf2.2 <- update(mf2.1,~.-TSB_Tonnes_scale)
+anova(mf2.2)
+mf2.3 <- update(mf2.2,~.-Length:MeanBT_scale)
+anova(mf2.3)
+mf2.4 <- update(mf2.3,~.-MeanBT_scale)
+anova(mf2.4)
+mf2.5 <- update(mf2.4,~.-CPUE_Length_Year_scale_log)
+anova(mf2.5)
+plot(mf.5)
+AIC(mf0,mf1,mf1.1,mf1.2,mf1.3,mf2)
+acf(resid(m1))
+acf(dd$Diff_Num_SubArea_Length, na.action = na.omit)
+
+dd10<- dd %>% 
+  filter(Length =="10")
+
+m<- lm(Diff_Num_SubArea_Length ~ Length,dd)
+anova(m)
+plot(dd$Length,dd$Diff_Num_SubArea_Length)
+
+### Final model:mf1.3
+anova(mf1.3)
+summary(mf1.3)
+
+
+plot(dd10$Num_SubArea_Length,dd10$lag_Num_SubArea_Length)
+acf(dd10$Num_SubArea_Length)
+acf(resid(mf1.3))
+
+
+# Fit AR as predictor in lm model
+dd1 <- dd %>% 
+  filter(Length =="1")
+dd2 <- dd %>% 
+  filter(Length =="2")
+
+mm1<-lm(Diff_Num_SubArea_Length ~ Length + lag_Num_SubArea_Length,dd)
+
+mm2<-lm(Diff_Num_SubArea_Length ~ Length + lag_Num_SubArea_Length +
+         lag2_Num_SubArea_Length,dd)
+
+anova(mm1)  
+AIC(mm1,mm2)
+plot(mm1)
+E <- acf(resid(lm))
+coplot(resid(lm)~fitted(lm)|Length,)
+
+
+plot(fitted(lm),resid(lm))
+plot(dd$Length,dd$Stan_SubArea_Length)
+
+
+# Use Stan_Num_SubArea_Length
+mm1<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length,dd,
+        na.action = na.omit)
+
+mm2<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length,dd, na.action = na.omit)
+
+mm3<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length,dd,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length+
+          lag4_Stan_SubArea_Length,dd,
+         na.action = na.omit)
+
+summary(mm1) # r2 = 0.19
+summary(mm2) # r2 = 0.32
+summary(mm3) # r2 = 0.38 
+summary(mm4) # r2 = 0.39
+
+
+m <- lm(Diff_Stan_SubArea_Length ~ 
+     lag_Stan_SubArea_Length+
+    lag2_Stan_SubArea_Length+
+      lag3_Stan_SubArea_Length +
+      lag4_Stan_SubArea_Length +
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale,dd)
+
+AIC(m)
+anova(m)
+plot(m)
+acf(resid(m))
+plot(dd$Stan_SubArea_Length~dd$TSB_Tonnes_scale)
+
+# mf<- gls(Diff_Stan_SubArea_Length ~ 
+#        CPUE_Length_Year_scale_log+
+#        Length * TSB_Tonnes_scale +
+#        Length * MeanBT_scale,
+#        correlation = corARMA(form = ~ Year | Length , p = 3, q = 0), 
+#      dd, na.action = na.omit)
+# anova(mf)
+# 
+# acf(resid(mf))
+
+
+
+
+
+# Check AR with individual length
+dd5 <- dd %>% 
+  filter(Length =="5")
+
+mm1<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length,dd5,
+        na.action = na.omit)
+
+mm2<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length,dd5, na.action = na.omit)
+
+mm3<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length,dd5,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length+
+          lag4_Stan_SubArea_Length,dd5,
+         na.action = na.omit)
+
+AIC(mm1)
+AIC(mm2)
+AIC(mm3)
+AIC(mm4)
+summary(mm1) # r2 = 0.19
+summary(mm2) # r2 = 0.32
+summary(mm3) # r2 = 0.38 
+summary(mm4) # r2 = 0.39
+
+dd5 <- dd %>% 
+  filter(Length =="19")
+m5 <- lm(Diff_Stan_SubArea_Length ~ 
+     lag_Stan_SubArea_Length
+#    lag2_Stan_SubArea_Length+
+      #lag3_Stan_SubArea_Length 
+#      lag4_Stan_SubArea_Length 
+     #CPUE_Length_Year_scale_log +
+      #TSB_Tonnes_scale +
+      #MeanBT_scale,
+      ,dd5)
+acf(resid(m5))
+AIC(m5)
+
+
+m5 <- lm(Diff_Stan_SubArea_Length ~ 
+     lag_Stan_SubArea_Length
+    lag2_Stan_SubArea_Length+
+      lag3_Stan_SubArea_Length+
+ lag4_Stan_SubArea_Length 
+     #CPUE_Length_Year_scale_log +
+      #TSB_Tonnes_scale +
+      #MeanBT_scale,
+      ,dd5)
+
+
+
+cor.test(dd$MeanBT, dd$TSB_Tonnes)
+
+```
+
+
+
+# Cod,Diff_Centroid_lon: 
+```{r}
+
+cpue.length.cod <-
+  cpue.length.year %>% 
+  filter(Species == "Atlantic cod")
+
+dd <- cpue.length.cod
+
+
+#1 Check AR with full dataset using AIC and R2
+# Use Diff_Centroid_lon
+
+mm1<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon,dd,
+         na.action = na.omit)
+
+mm2<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon+
+          lag2_Centroid_lon,dd,
+         na.action = na.omit)
+
+mm3<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon,dd,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon+
+          lag4_Centroid_lon,dd,
+         na.action = na.omit)
+
+summary(mm1) # r2 = 0.29
+summary(mm2) # r2 = 0.30
+summary(mm3) # r2 = 0.317
+summary(mm4) # r2 = 0.314
+AIC(mm1) # 3261
+AIC(mm2) # 3191
+AIC(mm3) # 3120
+AIC(mm4) # 3054
+
+## From best to worst: mm3/mm4>mm2>mm1
+
+
+#2 Check AR with length subset (Length = 0, 5, 15,19)
+dd5 <- dd %>% 
+  filter(Length =="19")
+
+
+mm1<-lm(Diff_Centroid_lon ~ lag_Centroid_lon,dd5,
+         na.action = na.omit)
+
+mm2<-lm(Diff_Centroid_lon ~ lag_Centroid_lon+
+          lag2_Centroid_lon,dd5,
+         na.action = na.omit)
+
+mm3<-lm(Diff_Centroid_lon ~ lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon,dd5,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Centroid_lon ~ lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon+
+          lag4_Centroid_lon,dd5,
+         na.action = na.omit)
+
+
+summary(mm1) # r2 = 0.28 # 0.18 # 0.37 # 0.37
+summary(mm2) # r2 = 0.30 # 0.19 # 0.43 # 0.43
+summary(mm3) # r2 = 0.33 # 0.19 # 0.46 # 0.46
+summary(mm4) # r2 = 0.31 # 0.24 # 0.46 # 0.46
+
+AIC(mm1) # 172 # 160 # 118 # 154
+AIC(mm2) # 170 # 158 # 114 # 149
+AIC(mm3) # 166 # 158 # 112 # 146
+AIC(mm4) # 165 # 154 # 112 # 145
+
+acf(resid(mm1))
+acf(resid(mm2))
+acf(resid(mm3))
+acf(resid(mm4))
+
+## mm3 > mm4/mm2 > mm1
+
+
+# 3 Fit full model with best AR (AR3)
+
+mm4<-lm(Diff_Centroid_lon ~ lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon+
+          lag4_Centroid_lon,dd5,
+         na.action = na.omit)
+
+
+m <- lm(Diff_Centroid_lon ~ 
+     lag_Centroid_lon+
+    lag2_Centroid_lon+
+      lag3_Centroid_lon +
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale,dd)
+
+anova(m)
+plot(m) # Check QQ
+
+# 4 Backward Parsimonious 
+m1 <- update(m,~.-Length:TSB_Tonnes_scale)
+anova(m1)
+m2 <- update(m1,~.-Length:MeanBT_scale )
+anova(m2)
+m3 <- update(m2,~.-MeanBT_scale)
+anova(m3)
+m4 <- update(m3,~.-TSB_Tonnes_scale)
+anova(m4)
+summary(m4) #r2=0.31
+AIC(m4) #3120
+# Double check AR
+m5<- update(m4,~.-lag3_Centroid_lon)
+m6 <- update(m5,~.-lag2_Centroid_lon)
+summary(m5) # r2=0.30
+summary(m6) # r2=0.29
+AIC(m5) # AIC 3192
+AIC(m6) # AIC 3261
+
+# Final:m4 has min AIC,max R2
+anova(m4)
+summary(m4)
+```
+
+
+# Cod,Diff_Centroid_lat: 
+```{r}
+
+cpue.length.cod <-
+  cpue.length.year %>% 
+  filter(Species == "Atlantic cod")
+
+dd <- cpue.length.cod
+
+
+#1 Check AR with full dataset using AIC and R2
+# Use Diff_Centroid_lon
+
+mm1<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat,dd,
+         na.action = na.omit)
+
+mm2<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat+
+          lag2_Centroid_lat,dd,
+         na.action = na.omit)
+
+mm3<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat+
+          lag2_Centroid_lat+lag3_Centroid_lat,dd,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat+
+          lag2_Centroid_lat+lag3_Centroid_lat+
+          lag4_Centroid_lat,dd,
+         na.action = na.omit)
+
+summary(mm1) # r2 = 0.34
+summary(mm2) # r2 = 0.38
+summary(mm3) # r2 = 0.38
+summary(mm4) # r2 = 0.38
+AIC(mm1) # 2363
+AIC(mm2) # 2259
+AIC(mm3) # 2204
+AIC(mm4) # 2165
+
+## From best to worst: mm4>mm3>mm2>mm1
+
+
+#2 Check AR with length subset (Length = 0, 5)
+dd5 <- dd %>% 
+  filter(Length =="5")
+
+
+mm1<-lm(Diff_Centroid_lat ~ lag_Centroid_lat,dd5,
+         na.action = na.omit)
+
+mm2<-lm(Diff_Centroid_lat ~ lag_Centroid_lat+
+          lag2_Centroid_lat,dd5,
+         na.action = na.omit)
+
+mm3<-lm(Diff_Centroid_lat ~ lag_Centroid_lat+
+          lag2_Centroid_lat+lag3_Centroid_lat,dd5,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Centroid_lat ~ lag_Centroid_lat+
+          lag2_Centroid_lat+lag3_Centroid_lat+
+          lag4_Centroid_lat,dd5,
+         na.action = na.omit)
+
+
+summary(mm1) # r2 = 0.29 # 0.18
+summary(mm2) # r2 = 0.37 # 0.39
+summary(mm3) # r2 = 0.38 # 0.39
+summary(mm4) # r2 = 0.39 # 0.40
+
+AIC(mm1) # 65.47 # 91
+AIC(mm2) # 61.1 # 72
+AIC(mm3) # 60.5 # 71
+AIC(mm4) # 61.5 # 72
+
+acf(resid(mm1))
+acf(resid(mm2))
+acf(resid(mm3))
+acf(resid(mm4))
+
+## mm3 > mm4> mm2 > mm1
+
+
+# 3 Fit full model with best AR (AR3)
+
+m <- lm(Diff_Centroid_lat ~ 
+     lag_Centroid_lat+
+    lag2_Centroid_lat+
+      lag3_Centroid_lat +
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale,dd)
+
+anova(m)
+plot(m) # Check QQ
+
+# 4 Backward Parsimonious 
+m1 <- update(m,~.-Length:MeanBT_scale)
+anova(m1)
+m2 <- update(m1,~.-Length:TSB_Tonnes_scale )
+anova(m2)
+m3 <- update(m2,~.-MeanBT_scale)
+anova(m3)
+m4 <- update(m3,~.-CPUE_Length_Year_scale_log)
+anova(m4) 
+summary(m4) # 0.43
+AIC(m4) # 1999
+
+# 5 Double check AR
+m5 <- update(m4,~.-lag3_Centroid_lat)
+m6 <- update(m5,~.-lag2_Centroid_lat)
+summary(m5) # 0.43
+summary(m6) # 0.43
+AIC(m5) # 2036
+AIC(m6) # 2093
+
+
+## final model: m4 same R2 min AIC
+anova(m4)
+summary(m4)
+ggplot(dd,aes(x = TSB_Tonnes_scale, y = Centroid_lat))+
+  geom_point()+
+  facet_wrap("Length")
+
+
+```
+
+# Haddock, distribution range: 
+```{r}
+
+cpue.length.haddock <-
+  cpue.length.year %>% 
+  filter(Species == "Haddock")
+
+dd <- cpue.length.haddock
+
+#1 Check AR with full dataset using AIC and R2
+# Use Stan_Num_SubArea_Length
+mm1<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length,dd,
+        na.action = na.omit)
+
+mm2<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length,dd, na.action = na.omit)
+
+mm3<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length,dd,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length+
+          lag4_Stan_SubArea_Length,dd,
+         na.action = na.omit)
+
+summary(mm1) # r2 = 0.18
+summary(mm2) # r2 = 0.23
+summary(mm3) # r2 = 0.23
+summary(mm4) # r2 = 0.24
+AIC(mm1) # -829
+AIC(mm2) # -889
+AIC(mm3) # -863
+AIC(mm4) # -872
+
+## Best : Not obvious, mm2 
+
+#2 Check AR with length subset (Length = 0, 5, 15, )
+dd5 <- dd %>% 
+  filter(Length =="0")
+
+mm1<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length,dd5,
+        na.action = na.omit)
+
+mm2<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length,dd5, na.action = na.omit)
+
+mm3<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length,dd5,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length+
+          lag4_Stan_SubArea_Length,dd5,
+         na.action = na.omit)
+
+
+summary(mm1) # r2 = 0.28 # 0.12 # 0.18
+summary(mm2) # r2 = 0.29 # 0.15 # 0.19
+summary(mm3) # r2 = 0.28 # 0.15 # 0.18
+summary(mm4) # r2 = 0.30 # 0.25 # 0.18
+
+AIC(mm1) # 2.1 # -75 # -74
+AIC(mm2) # 4.9 # -73 # -70
+AIC(mm3) # 7.6 # -68 # -66
+AIC(mm4) # 8.7 # -70 # -62
+
+acf(resid(mm1))
+acf(resid(mm2))
+acf(resid(mm3))
+acf(resid(mm4))
+
+## Not clear, mm1
+
+
+# 3 Fit full model with best AR 
+## As AR 1-4 seems similar, fit AR4, then trimming 
+
+m <- lm(Diff_Stan_SubArea_Length ~ 
+     lag_Stan_SubArea_Length+
+    lag2_Stan_SubArea_Length+
+      lag3_Stan_SubArea_Length +
+      lag4_Stan_SubArea_Length +
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale,dd)
+
+anova(m)
+plot(m) # Check QQ
+
+# 4 Backward Parsimonious 
+m1 <- update(m,~.-Length:TSB_Tonnes_scale)
+anova(m1)
+m2 <- update(m1,~.-Length:MeanBT_scale )
+anova(m2)
+m3 <- update(m2,~.-MeanBT_scale)
+anova(m3)
+m4 <- update(m3,~.-lag4_Stan_SubArea_Length)
+anova(m4)
+plot(m4)
+AIC(m4) # -1296
+
+# 5 Check other AR
+m5 <- update(m4,~.-lag4_Stan_SubArea_Length)
+m6 <- update(m5,~.-lag3_Stan_SubArea_Length)
+m7 <- update(m6,~.-lag2_Stan_SubArea_Length)
+m8 <- update(m7,~.-lag1_Stan_SubArea_Length)
+AIC(m5) # -1296
+AIC(m6) # -1319
+AIC(m7) # -1231
+AIC(m8) # -1231
+## final model: m6 (AR2)
+anova(m6)
+summary(m6)
+```
+
+# Haddock,Diff_Centroid_lon: 
+```{r}
+
+cpue.length.haddock <-
+  cpue.length.year %>% 
+  filter(Species == "Haddock")
+
+dd <- cpue.length.haddock
+
+
+#1 Check AR with full dataset using AIC and R2
+# Use Diff_Centroid_lon
+
+mm1<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon,dd,
+         na.action = na.omit)
+
+mm2<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon+
+          lag2_Centroid_lon,dd,
+         na.action = na.omit)
+
+mm3<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon,dd,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon+
+          lag4_Centroid_lon,dd,
+         na.action = na.omit)
+
+summary(mm1) # r2 = 0.37
+summary(mm2) # r2 = 0.40
+summary(mm3) # r2 = 0.41
+summary(mm4) # r2 = 0.41
+AIC(mm1) # 2689
+AIC(mm2) # 2593
+AIC(mm3) # 2529
+AIC(mm4) # 2451
+
+## best: not clear, mm4
+
+
+#2 Check AR with length subset (Length = 0, 15)
+dd5 <- dd %>% 
+  filter(Length =="0")
+
+
+mm1<-lm(Diff_Centroid_lon ~ lag_Centroid_lon,dd5,
+         na.action = na.omit)
+
+mm2<-lm(Diff_Centroid_lon ~ lag_Centroid_lon+
+          lag2_Centroid_lon,dd5,
+         na.action = na.omit)
+
+mm3<-lm(Diff_Centroid_lon ~ lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon,dd5,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Centroid_lon ~ lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon+
+          lag4_Centroid_lon,dd5,
+         na.action = na.omit)
+
+
+summary(mm1) # r2 = 0.61 # 0.34
+summary(mm2) # r2 = 0.65 # 0.45
+summary(mm3) # r2 = 0.64 # 0.56
+summary(mm4) # r2 = 0.64 # 0.55
+
+AIC(mm1) # 94
+AIC(mm2) # 90
+AIC(mm3) # 90
+AIC(mm4) # 90
+
+acf(resid(mm1))
+acf(resid(mm2))
+acf(resid(mm3))
+acf(resid(mm4))
+
+## mm3/mm4
+
+
+# 3 Fit full model with AR4 as not clear which AR is best
+
+m <- lm(Diff_Centroid_lon ~ 
+     lag_Centroid_lon+
+    lag2_Centroid_lon+
+      lag3_Centroid_lon +
+      lag4_Centroid_lon+
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale,dd)
+
+anova(m)
+plot(m) # Check QQ
+
+# 4 Backward Parsimonious 
+m1 <- update(m,~.-Length:TSB_Tonnes_scale)
+anova(m1)
+m2 <- update(m1,~.-Length:MeanBT_scale )
+anova(m2)
+
+# 5 Double check AR
+m3 <- update(m2,~.-lag4_Centroid_lon)
+m4 <- update(m3,~.-lag3_Centroid_lon)
+m5 <- update(m4,~.-lag2_Centroid_lon)
+m6 <- update(m5,~.-lag_Centroid_lon)
+AIC(m2) # 2274
+AIC(m3) # 2347 
+AIC(m4) # 2409
+AIC(m5) # 2497
+AIC(m6)
+## final model: m2 (AR4)
+anova(m2)
+summary(m2)
+
+```
+
+# Haddock,Diff_Centroid_lat: 
+```{r}
+
+cpue.length.haddock <-
+  cpue.length.year %>% 
+  filter(Species == "Haddock")
+
+dd <- cpue.length.haddock
+
+
+#1 Check AR with full dataset using AIC and R2
+# Use Diff_Centroid_lon
+
+mm1<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat,dd,
+         na.action = na.omit)
+
+mm2<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat+
+          lag2_Centroid_lat,dd,
+         na.action = na.omit)
+
+mm3<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat+
+          lag2_Centroid_lat+lag3_Centroid_lat,dd,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat+
+          lag2_Centroid_lat+lag3_Centroid_lat+
+          lag4_Centroid_lat,dd,
+         na.action = na.omit)
+
+summary(mm1) # r2 = 0.31
+summary(mm2) # r2 = 0.35
+summary(mm3) # r2 = 0.38
+summary(mm4) # r2 = 0.36
+AIC(mm1) # 1662
+AIC(mm2) # 1582
+AIC(mm3) # 1515
+AIC(mm4) # 1478
+
+## mm3/mm4
+
+
+# #2 Check AR with length subset (Length = 0, 5)
+# dd5 <- dd %>% 
+#   filter(Length =="5")
+# 
+# 
+# mm1<-lm(Diff_Centroid_lat ~ lag_Centroid_lat,dd5,
+#          na.action = na.omit)
+# 
+# mm2<-lm(Diff_Centroid_lat ~ lag_Centroid_lat+
+#           lag2_Centroid_lat,dd5,
+#          na.action = na.omit)
+# 
+# mm3<-lm(Diff_Centroid_lat ~ lag_Centroid_lat+
+#           lag2_Centroid_lat+lag3_Centroid_lat,dd5,
+#          na.action = na.omit)
+# 
+# mm4<-lm(Diff_Centroid_lat ~ lag_Centroid_lat+
+#           lag2_Centroid_lat+lag3_Centroid_lat+
+#           lag4_Centroid_lat,dd5,
+#          na.action = na.omit)
+# 
+# 
+# summary(mm1) # r2 = 0.29 # 0.18
+# summary(mm2) # r2 = 0.37 # 0.39
+# summary(mm3) # r2 = 0.38 # 0.39
+# summary(mm4) # r2 = 0.39 # 0.40
+# 
+# AIC(mm1) # 65.47 # 91
+# AIC(mm2) # 61.1 # 72
+# AIC(mm3) # 60.5 # 71
+# AIC(mm4) # 61.5 # 72
+# 
+# acf(resid(mm1))
+# acf(resid(mm2))
+# acf(resid(mm3))
+# acf(resid(mm4))
+
+
+# 3 Fit full model with highest AR
+
+m <- lm(Diff_Centroid_lat ~ 
+     lag_Centroid_lat+
+    lag2_Centroid_lat+
+      lag3_Centroid_lat +
+      lag4_Centroid_lat +
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale,dd)
+
+anova(m)
+plot(m) # Check QQ
+
+# 4 Backward Parsimonious 
+m1 <- update(m,~.-Length:TSB_Tonnes_scale)
+anova(m1)
+m2 <- update(m1,~.-Length:MeanBT_scale)
+anova(m2)
+m3 <- update(m2,~.- TSB_Tonnes_scale)
+anova(m3)
+
+# 5 Double check AR
+m4 <- update(m3,~.-lag4_Centroid_lat)
+m5 <- update(m4,~.-lag3_Centroid_lat)
+m6 <- update(m5,~.-lag2_Centroid_lat)
+m7 <- update(m6,~.-lag_Centroid_lat)
+
+AIC(m3) # 1381
+AIC(m4) # 1418
+AIC(m5) # 1483
+AIC(m6) # 1566
+AIC(m7) # 1887
+
+## m3 is the best (AR4)
+anova(m3)
+summary(m3)
+
+```
+
+# Whiting, distribution range: 
+```{r}
+
+cpue.length.whiting <-
+  cpue.length.year %>% 
+  filter(Species == "Whiting")
+
+dd <- cpue.length.whiting
+
+#1 Check AR with full dataset using AIC and R2
+# Use Stan_Num_SubArea_Length
+mm1<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length,dd,
+        na.action = na.omit)
+
+mm2<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length,dd, na.action = na.omit)
+
+mm3<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length,dd,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Stan_SubArea_Length ~ Length + lag_Stan_SubArea_Length+
+          lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length+
+          lag4_Stan_SubArea_Length,dd,
+         na.action = na.omit)
+
+summary(mm1) # r2 = 0.19
+summary(mm2) # r2 = 0.18
+summary(mm3) # r2 = 0.19
+summary(mm4) # r2 = 0.19
+AIC(mm1) # -976
+AIC(mm2) # -951
+AIC(mm3) # -930
+AIC(mm4) # -918
+
+## From best to worst: mm4
+
+#2 Check AR with length subset (Length = 0, 5, 15, )
+# dd5 <- dd %>% 
+#   filter(Length =="15")
+# 
+# mm1<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length,dd5,
+#         na.action = na.omit)
+# 
+# mm2<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length+
+#           lag2_Stan_SubArea_Length,dd5, na.action = na.omit)
+# 
+# mm3<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length+
+#           lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length,dd5,
+#          na.action = na.omit)
+# 
+# mm4<-lm(Diff_Stan_SubArea_Length ~ lag_Stan_SubArea_Length+
+#           lag2_Stan_SubArea_Length+ lag3_Stan_SubArea_Length+
+#           lag4_Stan_SubArea_Length,dd5,
+#          na.action = na.omit)
+# 
+# 
+# summary(mm1) # r2 = 0.41 # 0.28 # 0.09
+# summary(mm2) # r2 = 0.49 # 0.40 # 0.12
+# summary(mm3) # r2 = 0.63 # 0.48 # 0.17
+# summary(mm4) # r2 = 0.64 # 0.51 # 0.29
+# 
+# AIC(mm1) # -4.06 #-34.6 # -39
+# AIC(mm2) # -8.2  # -40.8 # -37.30
+# AIC(mm3) # -18.56  #-43.5 # -37.36
+# AIC(mm4) # -16.8 # -42.1 # -40.18
+# 
+# acf(resid(mm1))
+# acf(resid(mm2))
+# acf(resid(mm3))
+# acf(resid(mm4))
+
+## mm3 > mm2/mm4 > mm1
+
+
+# 3 Fit full model with best AR (AR3)
+
+m <- lm(Diff_Stan_SubArea_Length ~ 
+     lag_Stan_SubArea_Length+
+    lag2_Stan_SubArea_Length+
+      lag3_Stan_SubArea_Length +
+      lag4_Stan_SubArea_Length +
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale,dd)
+
+anova(m)
+plot(m) # Check QQ
+
+# 4 Backward Parsimonious 
+m1 <- update(m,~.-Length:MeanBT_scale )
+anova(m1)
+m2 <- update(m1,~.-Length:TSB_Tonnes_scale)
+anova(m2)
+m3 <- update(m2,~.-lag3_Stan_SubArea_Length)
+anova(m3)
+m4 <- update(m3,~.-lag4_Stan_SubArea_Length)
+anova(m4)
+
+# 5 Check other AR
+m5 <- update(m4,~.-lag2_Stan_SubArea_Length)
+m6 <- update(m5,~.-lag1_Stan_SubArea_Length)
+AIC(m4) # -852
+AIC(m5) # -849
+AIC(m6) # -849
+
+# Final m4 with lowest AIC
+anova(m4)
+summary(m4)
+
+```
+
+# Whiting,Diff_Centroid_lon: 
+```{r}
+
+cpue.length.whiting <-
+  cpue.length.year %>% 
+  filter(Species == "Whiting")
+
+dd <- cpue.length.whiting
+
+
+#1 Check AR with full dataset using AIC and R2
+# Use Diff_Centroid_lon
+
+mm1<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon,dd,
+         na.action = na.omit)
+
+mm2<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon+
+          lag2_Centroid_lon,dd,
+         na.action = na.omit)
+
+mm3<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon,dd,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Centroid_lon ~ Length + lag_Centroid_lon+
+          lag2_Centroid_lon+lag3_Centroid_lon+
+          lag4_Centroid_lon,dd,
+         na.action = na.omit)
+
+summary(mm1) # r2 = 0.4
+summary(mm2) # r2 = 0.4
+summary(mm3) # r2 = 0.4
+summary(mm4) # r2 = 0.4
+AIC(mm1) # 2915
+AIC(mm2) # 2859
+AIC(mm3) # 2799
+AIC(mm4) # 2738
+
+## Best:mm4
+
+
+#2 Check AR with length subset (Length = 0, 5, 15,19)
+# dd5 <- dd %>% 
+#   filter(Length =="19")
+# 
+# 
+# mm1<-lm(Diff_Centroid_lon ~ lag_Centroid_lon,dd5,
+#          na.action = na.omit)
+# 
+# mm2<-lm(Diff_Centroid_lon ~ lag_Centroid_lon+
+#           lag2_Centroid_lon,dd5,
+#          na.action = na.omit)
+# 
+# mm3<-lm(Diff_Centroid_lon ~ lag_Centroid_lon+
+#           lag2_Centroid_lon+lag3_Centroid_lon,dd5,
+#          na.action = na.omit)
+# 
+# mm4<-lm(Diff_Centroid_lon ~ lag_Centroid_lon+
+#           lag2_Centroid_lon+lag3_Centroid_lon+
+#           lag4_Centroid_lon,dd5,
+#          na.action = na.omit)
+# 
+# 
+# summary(mm1) # r2 = 0.28 # 0.18 # 0.37 # 0.37
+# summary(mm2) # r2 = 0.30 # 0.19 # 0.43 # 0.43
+# summary(mm3) # r2 = 0.33 # 0.19 # 0.46 # 0.46
+# summary(mm4) # r2 = 0.31 # 0.24 # 0.46 # 0.46
+# 
+# AIC(mm1) # 172 # 160 # 118 # 154
+# AIC(mm2) # 170 # 158 # 114 # 149
+# AIC(mm3) # 166 # 158 # 112 # 146
+# AIC(mm4) # 165 # 154 # 112 # 145
+# 
+# acf(resid(mm1))
+# acf(resid(mm2))
+# acf(resid(mm3))
+# acf(resid(mm4))
+
+## mm3 > mm4/mm2 > mm1
+
+
+# 3 Fit full model with highest AR
+
+
+m <- lm(Diff_Centroid_lon ~ 
+     lag_Centroid_lon+
+    lag2_Centroid_lon+
+      lag3_Centroid_lon +
+      lag4_Centroid_lon +
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale,dd)
+
+anova(m)
+plot(m) # Check QQ
+
+# 4 Backward Parsimonious 
+m1 <- update(m,~.-Length:TSB_Tonnes_scale)
+anova(m1)
+m2 <- update(m1,~.-MeanBT_scale)
+anova(m2)
+m3 <- update(m2,~.-CPUE_Length_Year_scale_log)
+anova(m3)
+m4 <- update(m3,~.-TSB_Tonnes_scale)
+anova(m4)
+
+# 5 Double check AR
+m5 <- update(m4,~.-lag4_Centroid_lon)
+m6 <- update(m5,~.-lag3_Centroid_lon)
+m7 <- update(m6,~.-lag2_Centroid_lon)
+m8 <- update(m7,~.-lag_Centroid_lon)
+
+AIC(m4) # 2686
+AIC(m5) # 2747
+AIC(m6) # 2804
+AIC(m7) # 2859
+summary(m4) # R2= 0.45
+summary(m5) # r2 = 0.45
+summary(m6) # r2 = 0.44
+summary(m7) # r2 = 0.44
+
+# final: m4 (AR4) has the lowest AIC
+anova(m4)
+summary(m4)
+
+
+
+
+```
+
+# Whiting,Diff_Centroid_lat: 
+```{r}
+
+cpue.length.whiting <-
+  cpue.length.year %>% 
+  filter(Species == "Whiting")
+
+dd <- cpue.length.whiting
+
+
+#1 Check AR with full dataset using AIC and R2
+# Use Diff_Centroid_lon
+
+mm1<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat,dd,
+         na.action = na.omit)
+
+mm2<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat+
+          lag2_Centroid_lat,dd,
+         na.action = na.omit)
+
+mm3<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat+
+          lag2_Centroid_lat+lag3_Centroid_lat,dd,
+         na.action = na.omit)
+
+mm4<-lm(Diff_Centroid_lat ~ Length + lag_Centroid_lat+
+          lag2_Centroid_lat+lag3_Centroid_lat+
+          lag4_Centroid_lat,dd,
+         na.action = na.omit)
+
+summary(mm1) # r2 = 0.34
+summary(mm2) # r2 = 0.35
+summary(mm3) # r2 = 0.36
+summary(mm4) # r2 = 0.37
+AIC(mm1) # 2500
+AIC(mm2) # 2436
+AIC(mm3) # 2368
+AIC(mm4) # 2315
+
+## mm4 best
+
+
+#2 Check AR with length subset (Length = 0, 5)
+# dd5 <- dd %>% 
+#   filter(Length =="5")
+# 
+# 
+# mm1<-lm(Diff_Centroid_lat ~ lag_Centroid_lat,dd5,
+#          na.action = na.omit)
+# 
+# mm2<-lm(Diff_Centroid_lat ~ lag_Centroid_lat+
+#           lag2_Centroid_lat,dd5,
+#          na.action = na.omit)
+# 
+# mm3<-lm(Diff_Centroid_lat ~ lag_Centroid_lat+
+#           lag2_Centroid_lat+lag3_Centroid_lat,dd5,
+#          na.action = na.omit)
+# 
+# mm4<-lm(Diff_Centroid_lat ~ lag_Centroid_lat+
+#           lag2_Centroid_lat+lag3_Centroid_lat+
+#           lag4_Centroid_lat,dd5,
+#          na.action = na.omit)
+# 
+# 
+# summary(mm1) # r2 = 0.29 # 0.18
+# summary(mm2) # r2 = 0.37 # 0.39
+# summary(mm3) # r2 = 0.38 # 0.39
+# summary(mm4) # r2 = 0.39 # 0.40
+# 
+# AIC(mm1) # 65.47 # 91
+# AIC(mm2) # 61.1 # 72
+# AIC(mm3) # 60.5 # 71
+# AIC(mm4) # 61.5 # 72
+# 
+# acf(resid(mm1))
+# acf(resid(mm2))
+# acf(resid(mm3))
+# acf(resid(mm4))
+# 
+# ## mm3 > mm4> mm2 > mm1
+
+
+# 3 Fit full model with best AR (AR3)
+
+m <- lm(Diff_Centroid_lat ~ 
+     lag_Centroid_lat+
+    lag2_Centroid_lat+
+      lag3_Centroid_lat +
+      lag4_Centroid_lat +
+     CPUE_Length_Year_scale_log +
+     Length * TSB_Tonnes_scale +
+     Length * MeanBT_scale,dd)
+
+anova(m)
+plot(m) # Check QQ
+
+# 4 Backward Parsimonious 
+m1 <- update(m,~.-Length:MeanBT_scale)
+anova(m1)
+m2 <- update(m1,~.-MeanBT_scale )
+anova(m2)
+m3 <- update(m2,~.-Length:TSB_Tonnes_scale)
+anova(m3)
+m4 <- update(m3,~.-Length )
+anova(m4)
+m5 <- update(m4,~.-TSB_Tonnes_scale)
+anova(m5)
+
+
+# 5 Double check AR
+
+m6 <- update(m5,~.-lag4_Centroid_lat)
+m7 <- update(m6,~.-lag3_Centroid_lat)
+m8 <- update(m7,~.-lag2_Centroid_lat)
+m9 <- update(m8,~.-lag_Centroid_lat)
+
+AIC(m5) # 2338
+AIC(m6) # 2403
+AIC(m7) # 2503
+AIC(m8) # 2632
+AIC(m9) # 2837
+
+## final model: m5 (AR4) with lowest AIC
+anova(m5)
+summary(m5)
+
+cpue.length.cod %>% 
+  group_by(Year) %>%
+  tally()
+  
+```
+
+
+#-----------------Suppl corrplot ---------------------------------
+
+# Exract pairwise slope
+```{r eval=F}
+
+#-------- Extract slope from lm (overlap ~ time)
+
+## 1 nest data 
+n_overlap <- out.all %>% 
+  #ungroup(YearQua) %>% 
+  mutate_at('YearQua', as.numeric) %>% 
+  group_by(Region,Species, x, y) %>% 
+  nest() 
+
+## 2 Apply regression
+fun_overlap <-function(df) lm (Area_overlap ~ YearQua, data = df)
+
+m_overlap <- n_overlap %>% 
+  mutate(model = purrr::map(data, fun_overlap))
+
+
+## 3 Extract slope and confidence interval of slope
+slope_fun <- function(mod) coefficients(mod)[[2]]
+#ci_lower_fun <- function(mod) confint(mod)[2,1]
+#ci_upper_fun <- function(mod) confint(mod)[2,2]
+
+m_overlap_summary <- m_overlap %>% 
+  transmute(., slope = map_dbl(model, slope_fun)
+            #,lower_ci = map_dbl(model, ci_lower_fun),
+            #upper_ci = map_dbl(model, ci_upper_fun)
+            )
+
+#----------Check model fit
+
+m_overlap_all <- n_overlap %>% 
+  mutate(model = purrr::map(data, fun_overlap),
+         tidied = purrr::map(model, tidy),
+         glanced = purrr::map(model, glance),
+         augmented = purrr::map(model, augment))
+
+m_overlap_all %>%
+  unnest(tidied)
+
+m_overlap_all %>%
+  unnest(augmented)
+
+# p-value, r-square, adjusted r-square
+overlap_statistics_table <-
+m_overlap_all %>%
+  unnest(glanced) %>% 
+  select(Region, Species, x,y,r.squared,
+         adj.r.squared, p.value)
+
+```
+
+# Plot
+```{r}
+
+#--------- Prepare dataframe
+# select slope column & filter size class
+m_overlap_summary <- 
+  m_overlap_summary %>% 
+  # Select slope column
+  select(Region,Species, x, y, slope) 
+#%>% filter(x > 0 & y >1)
+
+corr.data  <- m_overlap_summary %>% 
+  ungroup(Region) %>% 
+  select(-Region)
+
+## transform data from long to wide
+corr.data  <- # long to wide form
+  pivot_wider(corr.data, 
+              names_from = y, 
+              values_from = slope)
+
+## replace NA to 0 (NA from another side of wide form)
+corr.data <- corr.data %>% 
+  replace(is.na(.), 0) 
+
+# Color for plotting correlogram
+col2 <- colorRampPalette(c("#053061","#2166AC","#4393C3","#92C5DE","#D1E5F0", "#FFFFFF", "#FDDBC7","#F4A582", "#D6604D", "#B2182B","#67001F"))
+
+# color limits
+m_overlap_summary %>% 
+  ungroup() %>% 
+  summarise(min = min(slope),
+            max = max(slope))
+
+# Data by species
+dd.cod <- corr.data %>% 
+  ungroup() %>% 
+  filter (Species == "Atlantic cod")
+dd.cod<- dd.cod[,-c(1,2)]  
+dd.cod <- as.matrix(dd.cod)
+rownames(dd.cod) <- c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19)
+dd.cod
+
+dd.haddock <- corr.data %>% 
+  ungroup() %>% 
+  filter (Species == "Haddock")
+dd.haddock<- dd.haddock[,-c(1,2)]  
+dd.haddock <- as.matrix(dd.haddock)
+rownames(dd.haddock) <- c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19)
+dd.haddock
+
+dd.whiting <- corr.data %>% 
+  ungroup() %>% 
+  filter (Species == "Whiting")
+dd.whiting  <- dd.whiting [,-c(1,2)]  
+dd.whiting<- as.matrix(dd.whiting )
+rownames(dd.whiting ) <- c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19)
+dd.whiting 
+
+# Plot
+par(mfrow = c(1,3))
+p1 <- corrplot(dd.cod,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         col.lim = c(-0.02,0.02), # for overlap
+         col = col2(50), 
+         title = paste0("Atlantic cod"),
+         mar=c(0,0,2,0)) 
+
+p2 <- corrplot(dd.haddock,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         col.lim = c(-0.02,0.02), # for overlap
+         col = col2(50), 
+         title = paste0("Haddock"),
+         mar=c(0,0,2,0)) 
+
+
+p3 <- corrplot(dd.whiting ,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         col.lim = c(-0.02,0.02), # for overlap
+         col = col2(30), 
+         title = paste0("Whiting"),
+         mar=c(0,0,2,0)) 
+ 
+
+```
+
+# Plot cod based on its scale
+```{r}
+par(mfrow = c(1,1))
+
+p1 <- corrplot(dd.cod,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         col.lim = c(-0.02,0), # for overlap
+         col = col2(50), 
+         title = paste0("Atlantic cod"),
+         mar=c(0,0,2,0)) 
+
+
+
+```
+
+
+#--------------- Suppl cod subpopulation -----------------
+# Divide into 
+```{r}
+
+```
+
+
+#---------Other results-----------
+
+# How long have fish moved
+```{r}
+dd <- cpue.length.year %>% 
+  group_by(Region,Species,Year,Length) %>% 
+  summarise(Mean_lon = mean(Centroid_lon),
+            Mean_lat = mean(Centroid_lat))
+
+dd.cod <- dd %>% 
+  filter(Species == "Atlantic cod")
+ggplot(dd.cod, aes(x = Year, y = Mean_lat))+
+  geom_point()+
+  facet_wrap(~Length+Species)+
+  geom_smooth()
+
+```
+
+
+# Plot CPUE, Home range
+```{r eval = FALSE}
+
+# Plot CPUE & home range over time
+# 1 create a function
+plot.fun <- function(.x,.y){
+  ggplot(data = .x, aes(x = YearQua, y = value))+
+  facet_wrap(~Species, scales = "free")+
+  geom_point() +xlab("Year-Quarter")+
+  geom_smooth(method = "lm")+  
+  ggtitle("Species CPUE over landscape")+
+  theme + ggtitle(.y)
+}
+
+#2 gather 
+cpue.year.gather <- cpue.year %>% 
+  gather(key="Variables", value="value",
+         log_CPUE_Year, Number_Subarea_All_Length) 
+
+# 3 split, imap
+cpue.year.gather %>% 
+  ungroup(YearQua) %>%
+  mutate_at('YearQua',as.numeric) %>% 
+  split(list(cpue.year.gather$Variables, 
+             cpue.year.gather$Region)) %>% 
+  imap (.,plot.fun)
+
+
+# Population home range ~ Population CPUE
+plot.fun <- function(.x,.y){
+  ggplot(data = .x, aes(x = log(CPUE_Year), 
+                        y = Number_Subarea_All_Length,
+                        color=Species))+
+  geom_point()+
+  stat_smooth(method ="lm")+
+    xlab("Population size (logged CPUE)")+
+    ylab("Home range (number of grid cells)")+
+  theme + ggtitle(.y)
+}
+
+cpue.year %>% 
+  split(cpue.year$Region) %>% 
+  imap(.,plot.fun)
+
+
+```
+
+
+# Plot regional size indices over time
+Add "free_y" to facet_wrap or not has very different visual effect
+```{r}
+
+## Create a function
+plot.structure <- function(.x,.y){
+  ggplot(data=.x, aes(x=YearQua,y=value))+
+    geom_point()+
+    geom_smooth(method='lm', formula= y~x)+
+    facet_wrap(~Species,scales= "free_y")+   
+    xlab("Year-Quarter") + theme + ggtitle(paste0(.y),"at regional scale")
+  }
+
+
+## gather
+cpue.year.gather <- cpue.year %>% 
+  ungroup() %>% 
+  mutate_at('YearQua',as.numeric) %>% 
+  group_by(Species, YearQua) %>% 
+  gather(key="Variables", value="value", 
+         Regional_size_richness,Regional_Shannon,Regional_mean_size,
+         # The following three may not be computed 
+         # because of limited memory
+         #median_data, skewness_data, kurtosis_data,
+         factor_key = TRUE) 
+
+# split, imap
+cpue.year.gather %>% 
+  split(list(cpue.year.gather$Variables,
+             cpue.year.gather$Region)) %>% 
+  imap(.,plot.structure)
+
+
+```
+
+
+
+
+
+
+
+
+#----------------------------------------
+# Plot intersect & union
+```{r}  
+
+## Create a function
+plot.structure <- function(.x,.y){
+  ggplot(data=.x, aes(x=YearQua,y=value))+
+    geom_point()+
+    #geom_smooth(method='lm', formula= y~x)+
+    facet_wrap(~Species,scales= "free_y")+   
+    xlab("Year-Quarter") + theme + ggtitle(paste0(.y),"at regional scale")
+  }
+
+
+## gather
+cpue.year.gather <- cpue.year %>% 
+  ungroup() %>% 
+  mutate_at('YearQua',as.numeric) %>% 
+  group_by(Species, YearQua) %>% 
+  gather(key="Variables", value="value", 
+         Mean_intersect,Mean_union,
+         factor_key = TRUE) 
+
+# split, imap
+cpue.year.gather %>% 
+  split(list(cpue.year.gather$Variables,
+             cpue.year.gather$Region)) %>% 
+  imap(.,plot.structure)
+
+```
+
+
+
+
+# Plot effect size slope of overlap & local shannon~time
+- Big diff. between local & regional Shannon, probably because of high heterogeneity in local diversity.
+- Lower overlap does not have lower CV, probably because habitat shrinks and seperate at the same time.
+```{r}
+
+theme <- 
+  theme_bw()+
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), 
+    axis.line=element_line(colour = "black"),
+    legend.position="none")
+
+
+# Model overlap & local Shannon ~ time
+#1 Use gather to create a column with all Y-variables
+cpue.year.gather <- cpue.year %>% 
+  gather(key = "Variables", value = "value",
+         Paired_habitat_overlap, 
+         #Local_Shannon, 
+         #Local_size_richness, 
+         #Local_mean_size ,
+         Regional_Shannon, 
+         Regional_size_richness,
+         Regional_mean_size, 
+         Paired_habitat_overlap_deno, 
+         Mean_paired_lon_distance,
+         Mean_paired_lat_distance,
+         factor_key = TRUE)
+
+
+cpue.year.gather.nest <- cpue.year.gather %>% 
+  ungroup(YearQua) %>% 
+  mutate_at('YearQua', as.numeric) %>% 
+  group_by(Region, Species, Variables) %>% 
+  nest()
+
+#2 Fit function
+mod_fun <-function(df)lm(value ~ YearQua, data = df, na.action = na.omit)
+
+mod.data <- cpue.year.gather.nest %>% 
+  mutate(model = purrr::map(data, mod_fun))
+
+#3 Extract coefficients
+slope_fun <- function(mod) coefficients(mod)[[2]]
+ci_lower_fun <- function(mod) confint(mod)[2,1]
+ci_upper_fun <- function(mod) confint(mod)[2,2]
+
+summarise.data <- mod.data %>% 
+  dplyr::mutate(., slope = map_dbl(model, slope_fun),
+            lower_ci = map_dbl(model, ci_lower_fun),
+            upper_ci = map_dbl(model, ci_upper_fun))
+
+
+# plot
+# 1 split by Variables
+summarise.data.sp <- summarise.data %>% 
+  split(summarise.data$Variables) 
+   
+# 2 Create plot function
+plot.fun.slope <- function(.x,.y){
+  ggplot(data=.x, aes(x = Species,y = slope))+
+    geom_pointrange(aes(ymin = lower_ci, ymax = upper_ci))+
+    geom_hline(yintercept = 0, linetype = 2) +
+  facet_wrap("Region")+
+  ylab(paste0("Slope of temporal change in"," ",.y))+
+  theme + ggtitle(.y)+
+    coord_flip()
+  }
+
+# 3 plot with imap
+purrr::imap(summarise.data.sp,plot.fun.slope)
+
+
+```
+
+
+
+
+
+
+
+
+# Compute & plot correlogram pairwisew mean overlap_area across time
+##--- A bug, can't plot yet.
+```{r eval=FALSE}
+
+#--------Compute temporal mean
+
+overlap_mean <- out.all %>% 
+  group_by(Region, Species,x,y) %>% 
+  #summarise(mean_intersect_area = mean(Number_intersect))
+  summarise(mean_overlap = mean(Area_overlap))
+  
+#--------- Prepare dataframe
+#1 select slope column & filter size class
+overlap_mean <- overlap_mean %>% 
+  select(Region, Species, x, y, mean_overlap) %>%  # Select slope column
+  filter(x > 0 & y >1)
+
+#2 Check mean overlap range for each species
+overlap_mean %>% 
+  group_by(Region, Species) %>% 
+  summarise(min = min(mean_overlap),
+            max = max(mean_overlap))
+
+#3 transform data from long to wide
+overlap.mean.wide <- # long to wide form
+  pivot_wider(overlap_mean, 
+              names_from = y, 
+              values_from = mean_overlap)
+
+#4 replace na to 0
+overlap.mean.wide <- overlap.mean.wide %>% 
+  replace(is.na(.), 0)   
+
+#----------Draw correlogram
+# Split by Species
+overlap.mean.wide.pl <- overlap.mean.wide %>% 
+  split(list(overlap.mean.wide$Species,
+             overlap.mean.wide$Region)) 
+
+# Remove empty lists
+overlap.mean.wide.pl <-
+  overlap.mean.wide.pl[-c(15,16,17,18)] 
+  
+
+# correlogram function
+draw.correlogram <-function(.x,.y) {
+  dd<-.x[,-c(1,2)]
+  dd<-as.matrix(dd)
+  rownames(dd)<-c(1,2,3,4,5,6,7,8)
+  corrplot(as.matrix(dd),
+         method = "circle", 
+         is.corr = FALSE,
+         type = "upper",
+         cl.lim = c(-1,1), # for overlap
+         #cl.lim = c(-1,1), # for intersect and union
+         col = col2(50),
+         title(.y)
+         )
+}
+
+
+# draw.correlogram <-function(name) {
+#   dd <- overlap.pair.wide.pl %>% 
+#     filter(Species == name) 
+#   dd<-dd[,-c(1,2)]
+#   dd<-as.matrix(dd)
+#   rownames(dd)<-c(0,1,2,3,4,5,6,7,8)
+#   corrplot(as.matrix(dd),
+#          method = "circle", is.corr = FALSE)
+# }
+
+# plot with imap
+purrr::imap(overlap.mean.wide.pl, draw.correlogram) 
+  
+
+```
+
+
+#-----------------Pairwise---------------------------------
+# Compute swc & ns pairewise slope & p-value of overlap ~ time 
+```{r eval=F}
+
+#-------- Extract slope from lm (overlap ~ time)
+
+## 1 nest data 
+n_overlap <- out.all %>% 
+  #ungroup(YearQua) %>% 
+  mutate_at('YearQua', as.numeric) %>% 
+  group_by(Region,Species, x, y) %>% 
+  nest() 
+
+## 2 Apply regression
+fun_overlap <-function(df) lm (Area_overlap ~ YearQua, data = df)
+
+m_overlap <- n_overlap %>% 
+  mutate(model = purrr::map(data, fun_overlap))
+
+
+## 3 Extract slope and confidence interval of slope
+slope_fun <- function(mod) coefficients(mod)[[2]]
+#ci_lower_fun <- function(mod) confint(mod)[2,1]
+#ci_upper_fun <- function(mod) confint(mod)[2,2]
+
+m_overlap_summary <- m_overlap %>% 
+  transmute(., slope = map_dbl(model, slope_fun)
+            #,lower_ci = map_dbl(model, ci_lower_fun),
+            #upper_ci = map_dbl(model, ci_upper_fun)
+            )
+
+#----------Check model fit
+
+m_overlap_all <- n_overlap %>% 
+  mutate(model = purrr::map(data, fun_overlap),
+         tidied = purrr::map(model, tidy),
+         glanced = purrr::map(model, glance),
+         augmented = purrr::map(model, augment))
+
+m_overlap_all %>%
+  unnest(tidied)
+
+m_overlap_all %>%
+  unnest(augmented)
+
+# p-value, r-square, adjusted r-square
+overlap_statistics_table <-
+m_overlap_all %>%
+  unnest(glanced) %>% 
+  select(Region, Species, x,y,r.squared,
+         adj.r.squared, p.value)
+
+```
+
+# Test
+```{r}
+
+#--------- Prepare dataframe
+# select slope column & filter size class
+m_overlap_summary <- 
+  m_overlap_summary %>% 
+  # Select slope column
+  select(Region,Species, x, y, slope) %>%  
+  filter(x > 0 & y >1)
+
+corr.data  <- m_overlap_summary %>% 
+  ungroup(Region) %>% 
+  select(-Region)
+
+## transform data from long to wide
+corr.data  <- # long to wide form
+  pivot_wider(corr.data, 
+              names_from = y, 
+              values_from = slope)
+
+## replace NA to 0 (NA from another side of wide form)
+corr.data <- corr.data %>% 
+  replace(is.na(.), 0) 
+
+# Color for plotting correlogram
+col2 <- colorRampPalette(c("#053061","#2166AC","#4393C3","#92C5DE","#D1E5F0", "#FFFFFF", "#FDDBC7","#F4A582", "#D6604D", "#B2182B","#67001F"))
+
+# color limits
+m_overlap_summary %>% 
+  ungroup() %>% 
+  summarise(min = min(slope),
+            max = max(slope))
+
+# Data by species
+dd.cod <- corr.data %>% 
+  ungroup() %>% 
+  filter (Species == "Atlantic cod")
+dd.cod<- dd.cod[,-c(1,2)]  
+dd.cod <- as.matrix(dd.cod)
+rownames(dd.cod) <- c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18)
+dd.cod
+
+dd.haddock <- corr.data %>% 
+  ungroup() %>% 
+  filter (Species == "Haddock")
+dd.haddock<- dd.haddock[,-c(1,2)]  
+dd.haddock <- as.matrix(dd.haddock)
+rownames(dd.haddock) <- c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18)
+dd.haddock
+
+dd.whiting <- corr.data %>% 
+  ungroup() %>% 
+  filter (Species == "Whiting")
+dd.whiting  <- dd.whiting [,-c(1,2)]  
+dd.whiting<- as.matrix(dd.whiting )
+rownames(dd.whiting ) <- c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18)
+dd.whiting 
+
+# Plot
+par(mfrow = c(1,3))
+p1 <- corrplot(dd.cod,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         col.lim = c(-0.02,0.02), # for overlap
+         col = col2(50), 
+         title = paste0("North Sea Atlantic cod overlap slope"),
+         mar=c(0,0,2,0)) 
+
+p2 <- corrplot(dd.haddock,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         col.lim = c(-0.02,0.02), # for overlap
+         col = col2(50), 
+         title = paste0("Haddock North Sea overlap slope"),
+         mar=c(0,0,2,0)) 
+
+
+p3 <- corrplot(dd.whiting ,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         col.lim = c(-0.02,0.02), # for overlap
+         col = col2(30), 
+         title = paste0("North Sea Whiting overlap slope"),
+         mar=c(0,0,2,0)) 
+ 
+
+```
+
+
+
+# Plot swc & ns pairwise slope of overlap ~ time
+```{r eval=F}
+plot_overlap_slope <- function(region, region_abb){
+  
+  #--------- Prepare dataframe
+# select slope column & filter size class
+m_overlap_summary <- 
+  m_overlap_summary %>% 
+  # Select slope column
+  select(Region,Species, x, y, slope)  %>%  
+  filter(x > 0 & y >1)
+
+overlap_swc <- m_overlap_summary %>% 
+  filter(Region == region) %>% 
+  ungroup() %>% select(-Region)
+
+## transform data from long to wide
+overlap_swc <- # long to wide form
+  pivot_wider(overlap_swc, 
+              names_from = y, 
+              values_from = slope)
+
+## replace NA to 0 (NA from another side of wide form)
+overlap_swc <- overlap_swc %>% 
+  replace(is.na(.), 0) 
+
+# Color for plotting correlogram
+col2 <- colorRampPalette(c("#053061","#2166AC","#4393C3","#92C5DE","#D1E5F0", "#FFFFFF", "#FDDBC7","#F4A582", "#D6604D", "#B2182B","#67001F"))
+
+# to create 2x3 matrix for sub-plots
+
+par(mfrow = c(2,3))
+
+# p1
+dd <-overlap_swc %>% 
+  ungroup() %>% 
+  filter (Species == "Atlantic cod")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p1 <- corrplot(dd,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         cl.lim = c(-0.03,0.03), # for overlap
+         col = col2(50), 
+         title = paste0("Atlantic cod",sep = ",", 
+                        region_abb, sep = ",", "overlap"),
+         mar=c(0,0,2,0)) 
+
+# p2
+dd <-overlap_swc %>% 
+  ungroup() %>% 
+  filter (Species == "Haddock")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p2 <- corrplot(dd,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         cl.lim = c(-0.03,0.03), # for overlap
+         col = col2(50), 
+         title = paste0("Haddock",sep = ",", 
+                        region_abb, sep = ",", "overlap"),
+         mar=c(0,0,2,0)) 
+
+# p3
+dd <-overlap_swc %>% 
+  ungroup() %>% 
+  filter (Species == "Whiting")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p3 <- corrplot(dd,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         cl.lim = c(-0.03,0.03), # for overlap
+         col = col2(50), 
+         title = paste0("Whiting",sep = ",", 
+                        region_abb, sep = ",", "overlap"),
+         mar=c(0,0,2,0)) 
+ 
+# # p4
+# dd <-overlap_swc %>% 
+#   ungroup() %>% 
+#   filter (Species == "Saithe")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p4 <- corrplot(dd,
+#          method = "color", is.corr = FALSE,
+#          type = "upper",
+#          cl.lim = c(-0.03,0.03), # for overlap
+#          col = col2(50), 
+#          title = paste0("Saithe",sep = ",", 
+#                         region_abb, sep = ",", "overlap"),
+#          mar=c(0,0,2,0)) 
+# 
+# # p5
+# dd <-overlap_swc %>% 
+#   ungroup() %>% 
+#   filter (Species == "Atlantic mackerel")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p5 <- corrplot(dd,
+#          method = "color", is.corr = FALSE,
+#          type = "upper",
+#          cl.lim = c(-0.03,0.03), # for overlap
+#          col = col2(50), 
+#          title = paste0("Atlantic mackeral",sep = ",",
+#                         region_abb, sep = ",", "overlap"),
+#          mar=c(0,0,2,0)) 
+# 
+# 
+# # p6
+# dd <-overlap_swc %>% 
+#   ungroup() %>% 
+#   filter (Species == "Norway pout")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p6 <- corrplot(dd,
+#          method = "color", is.corr = FALSE,
+#          type = "upper",
+#          cl.lim = c(-0.03,0.03), # for overlap
+#          col = col2(50), 
+#          title = paste0("Norway pout",sep = ",", 
+#                         region_abb, sep = ",", "overlap"),
+#          mar=c(0,0,2,0)) 
+  
+}
+
+# plot_overlap_slope("Scottish West Coast", "swc")
+plot_overlap_slope("North Sea","ns")
+
+```
+
+
+# Plot swc & ns pairewise p-value of overlap ~ time
+```{r eval=F}
+
+plot_overlap_pvalue <- function(region, region_abb){
+  
+#--------- Prepare dataframe
+# select p.value column & filter size class
+
+m_overlap_summary_pvalue <- 
+  overlap_statistics_table %>% 
+  select(Region,Species, x, y, p.value)  %>%  
+  filter(x > 0 & y >1)
+
+overlap_swc_pvalue <- m_overlap_summary_pvalue %>% 
+  filter(Region == region) %>% 
+  ungroup() %>% select(-Region)
+
+## transform data from long to wide
+overlap_swc_pvalue <- # long to wide form
+  pivot_wider(overlap_swc_pvalue, 
+              names_from = y, 
+              values_from = p.value)
+
+## replace NA to 0 (NA from another side of wide form)
+overlap_swc_pvalue <- overlap_swc_pvalue %>% 
+  replace(is.na(.), 0) 
+
+# to create 2x3 matrix for sub-plots
+
+par(mfrow = c(2,3))
+
+# p1
+dd <-overlap_swc_pvalue %>% 
+  ungroup() %>% 
+  filter (Species == "Atlantic cod")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p1 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Atlantic cod",sep = ",",
+                        region_abb, sep = ",", "overlap",
+                         sep = "", "p-value"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black", col = "black", 
+         p.mat = dd,
+         tl.col = "black", sig.level = 0.1) 
+
+
+
+# p2
+dd <-overlap_swc_pvalue %>% 
+  ungroup() %>% 
+  filter (Species == "Haddock")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p2 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Haddock",sep = ",",
+                        region_abb, sep = ",", "overlap",
+                         sep = "", "p-value"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black", col = "black", 
+         p.mat = dd,
+         tl.col = "black", sig.level = 0.1) 
+
+
+# p3
+dd <-overlap_swc_pvalue %>% 
+  ungroup() %>% 
+  filter (Species == "Whiting")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p3 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Whiting",sep = ",",
+                        region_abb, sep = ",", "overlap",
+                         sep = "", "p-value"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black", col = "black", 
+         p.mat = dd,
+         tl.col = "black", sig.level = 0.1) 
+
+
+
+# # p4
+# dd <-overlap_swc_pvalue %>% 
+#   ungroup() %>% 
+#   filter (Species == "Saithe")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p4 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Saithe",sep = ",",
+#                         region_abb, sep = ",", "overlap",
+#                          sep = "", "p-value"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black", col = "black", 
+#          p.mat = dd,
+#          tl.col = "black", sig.level = 0.1) 
+# 
+# 
+# # p5
+# dd <-overlap_swc_pvalue %>% 
+#   ungroup() %>% 
+#   filter (Species == "Atlantic mackerel")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p5 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Atlantic mackerel",sep = ",",
+#                         region_abb, sep = ",", "overlap",
+#                          sep = "", "p-value"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black", col = "black", 
+#          p.mat = dd,
+#          tl.col = "black", sig.level = 0.1) 
+# 
+# 
+# # p6
+# dd <-overlap_swc_pvalue %>% 
+#   ungroup() %>% 
+#   filter (Species == "Norway pout")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p6 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Norway pout",sep = ",",
+#                         region_abb, sep = ",", "overlap",
+#                          sep = "", "p-value"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black", col = "black", 
+#          p.mat = dd,
+#          tl.col = "black", sig.level = 0.1) 
+
+}
+
+# plot_overlap_pvalue("Scottish West Coast", "swc")
+plot_overlap_pvalue("North Sea", "ns")
+
+```
+
+
+# Plot swc & ns pairewise r2 of overlap ~ time
+```{r eval=F}
+
+plot_overlap_r2 <- function(region, region_abb){
+  
+#--------- Prepare dataframe
+# select p.value column & filter size class
+
+m_overlap_summary_r2 <- 
+  overlap_statistics_table %>% 
+  select(Region,Species, x, y, adj.r.squared)  %>%  
+  filter(x > 0 & y >1)
+
+overlap_region_r2 <- m_overlap_summary_r2 %>% 
+  filter(Region == region) %>% 
+  ungroup() %>% select(-Region)
+
+## transform data from long to wide
+overlap_region_r2 <- # long to wide form
+  pivot_wider(overlap_region_r2, 
+              names_from = y, 
+              values_from = adj.r.squared)
+
+## replace NA to 0 (NA from another side of wide form)
+overlap_region_r2 <- overlap_region_r2 %>% 
+  replace(is.na(.), 0) 
+
+# to create 2x3 matrix for sub-plots
+
+par(mfrow = c(2,3))
+
+# p1
+dd <-overlap_region_r2 %>% 
+  ungroup() %>% 
+  filter (Species == "Atlantic cod")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p1 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Atlantic cod",sep = ",",
+                        region_abb, sep = ",", "overlap",
+                         sep = "", "adj R2"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black") 
+
+
+
+# p2
+dd <- overlap_region_r2 %>% 
+  ungroup() %>% 
+  filter (Species == "Haddock")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p2 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Haddock",sep = ",",
+                        region_abb, sep = ",", "overlap",
+                         sep = "", "adj R2"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black") 
+
+
+# p3
+dd <- overlap_region_r2 %>% 
+  ungroup() %>% 
+  filter (Species == "Whiting")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p3 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Whiting",sep = ",",
+                        region_abb, sep = ",", "overlap",
+                         sep = "", "adj R2"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black") 
+
+
+
+# # p4
+# dd <- overlap_region_r2 %>% 
+#   ungroup() %>% 
+#   filter (Species == "Saithe")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p4 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Saithe",sep = ",",
+#                         region_abb, sep = ",", "overlap",
+#                          sep = "", "adj R2"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black") 
+# 
+# 
+# # p5
+# dd <- overlap_region_r2 %>% 
+#   ungroup() %>% 
+#   filter (Species == "Atlantic mackerel")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p5 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Atlantic mackerel",sep = ",",
+#                         region_abb, sep = ",", "overlap",
+#                          sep = "", "adj R2"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black") 
+# 
+# 
+# # p6
+# dd <- overlap_region_r2 %>% 
+#   ungroup() %>% 
+#   filter (Species == "Norway pout")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p6 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Norway pout",sep = ",",
+#                         region_abb, sep = ",", "overlap",
+#                          sep = "", "adj R2"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black") 
+
+}
+
+# plot_overlap_r2("Scottish West Coast", "swc")
+plot_overlap_r2("North Sea", "ns")
+
+```
+
+
+
+
+# Compute swc & ns pairewise slope & p-value of centroid distance ~ time 
+```{r eval=F}
+
+#-------- Extract slope from lm (distance ~ time)
+
+## 0 Compute absolute distance (lon^2+lat^2)^1/2
+centroid_distance <- 
+  out_centroid_all %>% mutate (Distance = (((Distance_lon^2)+(Distance_lat^2))^(1/2)))
+
+## 1 nest data 
+n_centroid_distance <- centroid_distance %>% 
+  ungroup(YearQua) %>% 
+  mutate_at('YearQua', as.numeric) %>% 
+  group_by(Region,Species, x, y) %>% 
+  nest() 
+
+
+## 2 Apply regression
+fun_dis <-function(df) lm (Distance ~ YearQua, data = df)
+
+m_centroid_distance <- n_centroid_distance %>% 
+  mutate(model = purrr::map(data, fun_dis))
+
+## 3 Extract slope and confidence interval of slope
+slope_fun <- function(mod) coefficients(mod)[[2]]
+#ci_lower_fun <- function(mod) confint(mod)[2,1]
+#ci_upper_fun <- function(mod) confint(mod)[2,2]
+
+m_centroid_distance_summary <- m_centroid_distance %>% 
+  transmute(., slope = map_dbl(model, slope_fun)
+            #,lower_ci = map_dbl(model, ci_lower_fun),
+            #upper_ci = map_dbl(model, ci_upper_fun)
+            )
+
+
+# Check model fit
+
+m_centroid_distance_all <- n_centroid_distance %>% 
+  mutate(model = purrr::map(data, fun_dis),
+         tidied = purrr::map(model, tidy),
+         glanced = purrr::map(model, glance),
+         augmented = purrr::map(model, augment))
+
+m_centroid_distance_all  %>%
+  unnest(tidied)
+
+m_centroid_distance_all %>%
+  unnest(augmented)
+
+# p-value, r-square, adjusted r-square
+m_centroid_distance_statistics_table <-
+m_centroid_distance_all  %>%
+  unnest(glanced) %>% 
+  select(Region, Species, x,y,r.squared,
+         adj.r.squared, p.value)
+
+
+#-------Plot all pairwise area~year to see model fit
+n_centroid_distance
+
+plot_distance <- function(df) plot(Distance ~ YearQua, data = df)
+
+n_centroid_distance %>%
+  mutate(plot = map(data, plot_distance))
+
+
+```
+
+
+
+# Plot swc & ns pairwise slope of centroid distance ~ time
+```{r eval=F}
+
+# min and max of slope
+m_centroid_distance_summary %>% 
+  group_by(Species, Region) %>% 
+  summarise(min = min(slope, na.rm = T),
+            max = max(slope, na.rm = T))
+
+
+# plot
+plot_distance_slope <- function(region, region_abb){
+  
+  #--------- Prepare dataframe
+# select slope column & filter size class
+m_centroid_distance_summary <- 
+  m_centroid_distance_summary %>% 
+  # Select slope column
+  select(Region,Species, x, y, slope)  %>%  
+  filter(x > 0 & y >1)
+
+distance_region <- m_centroid_distance_summary %>% 
+  filter(Region == region) %>% 
+  ungroup() %>% select(-Region)
+
+## transform data from long to wide
+distance_region <- # long to wide form
+  pivot_wider(distance_region, 
+              names_from = y, 
+              values_from = slope)
+
+## replace NA to 0 (NA from another side of wide form)
+distance_region <- distance_region %>% 
+  replace(is.na(.), 0) 
+
+# Color for plotting correlogram
+col2 <- colorRampPalette(c("#053061","#2166AC","#4393C3","#92C5DE","#D1E5F0", "#FFFFFF", "#FDDBC7","#F4A582", "#D6604D", "#B2182B","#67001F"))
+
+# to create 2x3 matrix for sub-plots
+
+par(mfrow = c(2,3))
+
+# p1
+dd <-distance_region%>% 
+  ungroup() %>% 
+  filter (Species == "Atlantic cod")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p1 <- corrplot(dd,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         cl.lim = c(-0.3,0.3), 
+         col = col2(50), 
+         title = paste0("Atlantic cod",sep = ",", 
+                        region_abb, sep = ",", "centroid distance"),
+         mar=c(0,0,2,0)) 
+
+# p2
+dd <-distance_region %>% 
+  ungroup() %>% 
+  filter (Species == "Haddock")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p2 <- corrplot(dd,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         cl.lim = c(-0.3,0.3), 
+         col = col2(50), 
+         title = paste0("Haddock",sep = ",", 
+                        region_abb, sep = ",", "centroid distance"),
+         mar=c(0,0,2,0)) 
+
+# p3
+dd <-distance_region %>% 
+  ungroup() %>% 
+  filter (Species == "Whiting")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p3 <- corrplot(dd,
+         method = "color", is.corr = FALSE,
+         type = "upper",
+         cl.lim = c(-0.3,0.3), 
+         col = col2(50), 
+         title = paste0("Whiting",sep = ",", 
+                        region_abb, sep = ",", "centroid distance"),
+         mar=c(0,0,2,0)) 
+
+# # p4
+# dd <-distance_region %>% 
+#   ungroup() %>% 
+#   filter (Species == "Saithe")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p4 <- corrplot(dd,
+#          method = "color", is.corr = FALSE,
+#          type = "upper",
+#          cl.lim = c(-0.3,0.3), 
+#          col = col2(50), 
+#          title = paste0("Saithe",sep = ",", 
+#                         region_abb, sep = ",", "overlap"),
+#          mar=c(0,0,2,0)) 
+# 
+# # p5
+# dd <-distance_region %>% 
+#   ungroup() %>% 
+#   filter (Species == "Atlantic mackerel")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p5 <- corrplot(dd,
+#          method = "color", is.corr = FALSE,
+#          type = "upper",
+#          cl.lim = c(-0.3,0.3), 
+#          col = col2(50), 
+#          title = paste0("Atlantic mackeral",sep = ",",
+#                         region_abb, sep = ",", "overlap"),
+#          mar=c(0,0,2,0)) 
+# 
+# 
+# # p6
+# dd <-distance_region %>% 
+#   ungroup() %>% 
+#   filter (Species == "Norway pout")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p6 <- corrplot(dd,
+#          method = "color", is.corr = FALSE,
+#          type = "upper",
+#          cl.lim = c(-0.3,0.3), 
+#          col = col2(50), 
+#          title = paste0("Norway pout",sep = ",", 
+#                         region_abb, sep = ",", "overlap"),
+#          mar=c(0,0,2,0)) 
+#   
+}
+
+# plot_distance_slope("Scottish West Coast", "swc")
+plot_distance_slope("North Sea","ns")
+
+```
+
+
+# Plot swc & ns pairewise p-value of centroid distance ~ time
+```{r eval=F}
+
+
+plot_distance_pvalue <- function(region, region_abb){
+  
+#--------- Prepare dataframe
+# select p.value / adj.r.squared column & filter size class
+
+m_centroid_distance_pvalue <- 
+  m_centroid_distance_statistics_table %>% 
+  select(Region,Species, x, y, p.value)  %>%  
+  filter(x > 0 & y >1)
+
+distance_region_pvalue <- m_centroid_distance_pvalue %>% 
+  filter(Region == region) %>% 
+  ungroup() %>% select(-Region)
+
+## transform data from long to wide
+distance_region_pvalue <- # long to wide form
+  pivot_wider(distance_region_pvalue, 
+              names_from = y, 
+              values_from = p.value)
+
+## replace NA to 0 (NA from another side of wide form)
+distance_region_pvalue <- distance_region_pvalue %>% 
+  replace(is.na(.), 0) 
+
+# to create 2x3 matrix for sub-plots
+
+par(mfrow = c(2,3))
+
+# p1
+dd <-distance_region_pvalue %>% 
+  ungroup() %>% 
+  filter (Species == "Atlantic cod")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p1 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Atlantic cod",sep = ",",
+                        region_abb, sep = ",", "centroid distance",
+                         sep = "", "p-value"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black", col = "black", 
+         p.mat = dd,
+         tl.col = "black", sig.level = 0.1) 
+
+
+
+# p2
+dd <-distance_region_pvalue %>% 
+  ungroup() %>% 
+  filter (Species == "Haddock")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p2 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Haddock",sep = ",",
+                        region_abb, sep = ",", "centroid distance",
+                         sep = "", "p-value"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black", col = "black", 
+         p.mat = dd,
+         tl.col = "black", sig.level = 0.1) 
+
+
+# p3
+dd <-distance_region_pvalue %>% 
+  ungroup() %>% 
+  filter (Species == "Whiting")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p3 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Whiting",sep = ",",
+                        region_abb, sep = ",", "centroid distance",
+                         sep = "", "p-value"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black", col = "black", 
+         p.mat = dd,
+         tl.col = "black", sig.level = 0.1) 
+
+
+
+# # p4
+# dd <-distance_region_pvalue %>% 
+#   ungroup() %>% 
+#   filter (Species == "Saithe")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p4 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Saithe",sep = ",",
+#                         region_abb, sep = ",", "centroid distance",
+#                          sep = "", "p-value"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black", col = "black", 
+#          p.mat = dd,
+#          tl.col = "black", sig.level = 0.1) 
+# 
+# 
+# # p5
+# dd <-distance_region_pvalue %>% 
+#   ungroup() %>% 
+#   filter (Species == "Atlantic mackerel")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p5 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Atlantic mackerel",sep = ",",
+#                         region_abb, sep = ",", "centroid distance",
+#                          sep = "", "p-value"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black", col = "black", 
+#          p.mat = dd,
+#          tl.col = "black", sig.level = 0.1) 
+# 
+# 
+# # p6
+# dd <-distance_region_pvalue %>% 
+#   ungroup() %>% 
+#   filter (Species == "Norway pout")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p6 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Norway pout",sep = ",",
+#                         region_abb, sep = ",", "centroid distance",
+#                          sep = "", "p-value"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black", col = "black", 
+#          p.mat = dd,
+#          tl.col = "black" #, sig.level = 0.1
+#          ) 
+
+}
+
+# plot_distance_pvalue("Scottish West Coast", "swc")
+plot_distance_pvalue("North Sea", "ns")
+
+```
+
+
+# Plot swc & ns pairewise r2 of centroid distance ~ time
+```{r eval=F}
+
+
+plot_distance_r2 <- function(region, region_abb){
+  
+#--------- Prepare dataframe
+# select  adj.r.squared column & filter size class
+
+m_centroid_distance_r2 <- 
+  m_centroid_distance_statistics_table %>% 
+  select(Region,Species, x, y, adj.r.squared)  %>%  
+  filter(x > 0 & y >1)
+
+distance_region_r2 <- m_centroid_distance_r2 %>% 
+  filter(Region == region) %>% 
+  ungroup() %>% select(-Region)
+
+## transform data from long to wide
+distance_region_r2 <- # long to wide form
+  pivot_wider(distance_region_r2, 
+              names_from = y, 
+              values_from = adj.r.squared)
+
+## replace NA to 0 (NA from another side of wide form)
+distance_region_r2 <- distance_region_r2 %>% 
+  replace(is.na(.), 0) 
+
+# to create 2x3 matrix for sub-plots
+
+par(mfrow = c(2,3))
+
+# p1
+dd <-distance_region_r2 %>% 
+  ungroup() %>% 
+  filter (Species == "Atlantic cod")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p1 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Atlantic cod",sep = ",",
+                        region_abb, sep = ",", "centroid distance",
+                         sep = "", "adj R2"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black") 
+
+
+
+# p2
+dd <-distance_region_r2 %>% 
+  ungroup() %>% 
+  filter (Species == "Haddock")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p2 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Haddock",sep = ",",
+                        region_abb, sep = ",", "centroid distance",
+                         sep = "", "adj R2"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black") 
+
+
+# p3
+dd <-distance_region_r2 %>% 
+  ungroup() %>% 
+  filter (Species == "Whiting")
+dd<- dd[,-c(1,2)]  
+dd<- as.matrix(dd)
+rownames(dd) <- c(1,2,3,4,5,6,7,8)
+dd
+
+p3 <- corrplot(dd,
+         method = "number", is.corr = FALSE,
+         type = "upper",
+         title = paste0("Whiting",sep = ",",
+                        region_abb, sep = ",", "centroid distance",
+                         sep = "", "adj R2"),
+         mar=c(0,0,2,0),
+         addCoef.col = "black") 
+
+
+
+# # p4
+# dd <-distance_region_r2 %>% 
+#   ungroup() %>% 
+#   filter (Species == "Saithe")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p4 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Saithe",sep = ",",
+#                         region_abb, sep = ",", "centroid distance",
+#                          sep = "", "adj R2"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black") 
+# 
+# 
+# # p5
+# dd <-distance_region_r2 %>% 
+#   ungroup() %>% 
+#   filter (Species == "Atlantic mackerel")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p5 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Atlantic mackerel",sep = ",",
+#                         region_abb, sep = ",", "centroid distance",
+#                          sep = "", "adj R2"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black") 
+# 
+# 
+# # p6
+# dd <-distance_region_r2 %>% 
+#   ungroup() %>% 
+#   filter (Species == "Norway pout")
+# dd<- dd[,-c(1,2)]  
+# dd<- as.matrix(dd)
+# rownames(dd) <- c(1,2,3,4,5,6,7,8)
+# dd
+# 
+# p6 <- corrplot(dd,
+#          method = "number", is.corr = FALSE,
+#          type = "upper",
+#          title = paste0("Norway pout",sep = ",",
+#                         region_abb, sep = ",", "centroid distance",
+#                          sep = "", "adj R2"),
+#          mar=c(0,0,2,0),
+#          addCoef.col = "black"
+#          ) 
+
+}
+
+# plot_distance_r2("Scottish West Coast", "swc")
+plot_distance_r2("North Sea", "ns")
+
+```
+
+
+
+#------------ Relationships--------------------------
+
+
+
+# Mean_Prop_Subarea ~ CPUE_year
+```{r}
+
+# 1 filter
+cpue.year.filter <- cpue.year  %>% 
+  filter(log(CPUE_Year) > 6) %>% 
+  filter(Mean_Prop_SubArea < 0.7)
+
+# 3.1 Plot by species
+dot1 <- cpue.year.filter.gather %>% 
+  filter(Species=="Haddock" & Variables =="Paired_habitat_overlap") %>%
+  mutate(LineGroup = 1)
+
+cpue.year.filter.gather2 <- left_join(cpue.year.filter.gather,dot1)  
+
+cpue.year.filter.gather2<- cpue.year.filter.gather2 %>% 
+  replace_na(list(LineGroup = 0)) 
+
+ggplot(cpue.year.filter,
+       aes(x = log(CPUE_Year), 
+                     y= Mean_paired_lat_distance))+
+    geom_point(aes(colour = Species), size = 1)+
+  geom_smooth(method = 'lm',aes(colour = Species))+
+  #geom_smooth(method='lm', colour = "black",formula= y~x, aes(linetype=as.factor(LineGroup)))+
+ facet_wrap(vars(Species), scales = "free")+theme 
+
+# 3.3 regression 
+cpue.year.filter <-
+  cpue.year.filter %>% 
+  group_by(Species) %>% 
+  nest()
+
+regression_fun <- function(df) lm(Mean_paired_lon_distance ~ Mean_Prop_SubArea,data = df)
+
+cpue.year.filter.model <- cpue.year.filter %>% 
+  mutate(model = purrr::map(data, regression_fun),
+         tidied = purrr::map(model, tidy),
+         glanced = purrr::map(model, glance),
+         augmented = purrr::map(model, augment))
+
+# This shows r2 and p value
+cpue.year.filter.model %>% 
+  unnest(glanced) # note species order is changed.
+
+```
+
+
+# overlap / Prop_hab/ distance ~ CPUE
+```{r}
+
+plot(log(cpue.year$CPUE_Year),cpue.year$Paired_habitat_overlap)
+plot(log(cpue.year$CPUE_Year),cpue.year$Mean_Prop_SubArea)
+plot(log(cpue.year$CPUE_Year),cpue.year$Mean_paired_lon_distance)
+plot(log(cpue.year$CPUE_Year),cpue.year$Mean_paired_lat_distance)# It seems there are two groups. Plot linear regression line for each species to see if there is really a positive relationship.
+
+plot(cpue.year$Mean_Prop_SubArea,cpue.year$Mean_paired_lat_distance)
+plot(cpue.year$Mean_Prop_SubArea,cpue.year$Mean_paired_lon_distance)
+
+cpue.year.filter <-
+  cpue.year %>% 
+  filter(log(CPUE_Year) >10)
+
+ggplot(cpue.year.filter,
+       aes(x = log(CPUE_Year), 
+                     y= Mean_paired_lat_distance))+
+    geom_point(aes(colour = Species), size = 1)+
+  geom_smooth(method = 'lm',aes(colour = Species))+
+  #geom_smooth(method='lm', colour = "black",formula= y~x, aes(linetype=as.factor(LineGroup)))+
+ facet_wrap(vars(Species), scales = "free")+theme 
+
+```
+
+
+# Relationship overlap & centroid
+To continue: better gather into x_variable and y_variable, then plot and model. It is clearer and more efficient.
+```{r}
+
+# Plot relationship between habitat overlap and centroid distance
+plot(cpue.year$Mean_paired_lon_distance,
+     cpue.year$Paired_habitat_overlap)
+
+plot(cpue.year$Mean_paired_lat_distance,
+     cpue.year$Paired_habitat_overlap)
+
+plot(cpue.year$Mean_paired_lon_distance,
+     cpue.year$Paired_habitat_overlap_deno)
+
+plot(cpue.year$Mean_paired_lat_distance,
+     cpue.year$Paired_habitat_overlap_deno)
+
+# Graphs
+ggplot(data=cpue.year, aes(x=Mean_paired_lon_distance,
+                           y=Paired_habitat_overlap))+
+    geom_point()+
+      facet_wrap ('Species',scales = "free")+
+    geom_smooth(method='lm', formula= y~x)+
+    theme 
+
+ggplot(data=cpue.year, aes(x=Mean_paired_lat_distance,
+                           y=Paired_habitat_overlap_deno))+
+    geom_point()+
+      facet_wrap ('Species', scales = "free")+
+    geom_smooth(method='lm', formula= y~x)+
+    theme 
+
+ggplot(data=cpue.year, aes(x=Mean_paired_lon_distance,
+                           y=Paired_habitat_overlap))+
+    geom_point()+
+      facet_wrap ('Species', scales = "free")+
+    geom_smooth(method='lm', formula= y~x)+
+    theme 
+
+ggplot(data=cpue.year, aes(x=Mean_paired_lat_distance,
+                           y=Paired_habitat_overlap_deno))+
+    geom_point()+
+      facet_wrap ('Species', scales = "free")+
+    geom_smooth(method='lm', formula= y~x)+
+    theme 
+
+
+# Models
+cpue.year.cod <- cpue.year %>% 
+  filter(Species == "Atlantic cod")
+
+cpue.year.haddock <- cpue.year %>% 
+  filter(Species == "Haddock")
+
+cpue.year.whiting <- cpue.year %>% 
+  filter(Species == "Whiting")
+
+summary(lm(Paired_habitat_overlap~Mean_paired_lon_distance, 
+   data = cpue.year.cod))
+
+summary(lm(Paired_habitat_overlap~Mean_paired_lat_distance, 
+   data = cpue.year.cod))
+
+summary(lm(Paired_habitat_overlap_deno~Mean_paired_lon_distance, 
+   data = cpue.year.cod))
+
+summary(lm(Paired_habitat_overlap_deno~Mean_paired_lat_distance, 
+   data = cpue.year.cod))
+
+
+
+```
+
+
+
+
+# Habitat area ~ CPUE (length specific)
+```{r}
+# prop_hab ~ prop_abun
+cpue.length.year.split <- cpue.length.year %>%
+  ungroup("Length") %>% 
+    mutate_at('Length', as.character) %>%
+    mutate_at('YearQua', as.numeric) %>%
+    filter(Length %in% c(1,2,3,4,5,6,7,8)) 
+
+cpue.length.year.split <- cpue.length.year.split %>%
+  split(cpue.length.year.split$Species)
+  
+ plot.fun.hab.cpue <-function(.x, .y){
+   ggplot(data = .x,
+          aes(y=Num_SubArea_Length,x=log(CPUE_Length_Year)))+
+    scale_colour_viridis_d()+
+    geom_smooth(aes(color = Length), method = "lm", formula = 'y~x')+
+    geom_point(aes(color = Length))+ theme+
+  ggtitle(.y)+ylab("prop_habitat") +xlab ("prop_abundance")
+ } 
+    
+imap(cpue.length.year.split, plot.fun.hab.cpue)
+
+cpue.length.year
+```
+
+
+# Habitat overlap/distance ~ size diversity/mean age
+
+```{r}
+
+cpue.year %>% 
+  ggplot(aes(x = Regional_Shannon,
+             y = Paired_habitat_overlap))+
+           geom_point()+
+  facet_wrap(~Species, scales = "free")+
+  geom_smooth(method='loess', formula= y~x)+
+  xlab("Yearly mean grid-scale Shannon index from raw length ")+ ylab("Yearly mean paired overlap area")+
+  ggtitle("Habitat overlap ~ size diversity")+ 
+  theme
+
+cpue.year %>% 
+  ggplot(aes(x = Regional_Shannon,
+             y = Paired_habitat_overlap_deno))+
+           geom_point()+
+  facet_wrap(~Species, scales = "free")+
+  geom_smooth(method='lm', formula= y~x)+
+  xlab("Yearly mean grid-scale Shannon index from raw length ")+ ylab("Yearly mean paired overlap area")+
+  ggtitle("Habitat overlap ~ size diversity")+ 
+  theme
+
+
+cpue.year %>% 
+  ggplot(aes(x = Regional_Shannon,
+             y = Paired_habitat_overlap_deno))+
+           geom_point()+
+  facet_wrap(~Species, scales = "free")+
+  geom_smooth(method='loess', formula= y~x)+
+  xlab("Yearly mean grid-scale Shannon index from raw length ")+ ylab("Yearly mean paired overlap area")+
+  ggtitle("Habitat overlap ~ size diversity")+ 
+  theme
+
+
+cpue.year %>% 
+  ggplot(aes(x = Regional_mean_size,
+             y = Paired_habitat_overlap_deno))+
+           geom_point()+
+  facet_wrap(~Species, scales = "free")+
+  geom_smooth(method='loess', formula= y~x)+
+  xlab("Yearly mean grid-scale Shannon index from raw length ")+ ylab("Yearly mean paired overlap area")+
+  ggtitle("Habitat overlap ~ size diversity")+ 
+  theme
+
+cpue.year %>% 
+  ggplot(aes(x = Regional_size_richness,
+             y = Mean_paired_lat_distance))+
+           geom_point()+
+  facet_wrap(~Species, scales = "free")+
+  geom_smooth(method='loess', formula= y~x)+
+  xlab("Yearly mean grid-scale Shannon index from raw length ")+ 
+  ggtitle("Habitat overlap ~ size diversity")+ 
+  theme
+
+```
+
+
+
+#------------Fishing & bottomT ----------------
+
+# Plot Fishing & bottomT ~ year
+```{r}
+# TSB ~ Year
+cpue.year %>% 
+  ggplot(aes(y = TSB_Tonnes / 1000000,
+             x = Year,
+             color = Species))+
+           geom_point()+
+  geom_line()+
+  geom_smooth(method='lm', formula= y~x)+
+  xlab("Year")+ 
+  ylab("Total stock biomass (million)")+ 
+  theme
+
+# Fishing mortality ~ Year
+cpue.year %>% 
+  ggplot(aes(y = Fishing_Mortality,
+             x = Year,
+             color = Species))+
+           geom_point()+
+  geom_line()+
+  xlab("Year")+ 
+  ylab("Fishing mortality")+ 
+  theme
+
+#bottomT~ Year
+cpue.year %>% 
+  ggplot(aes(y = MeanBT,
+             x = Year))+
+           geom_point()+
+  geom_line()+
+  geom_smooth(method='lm', formula= y~x)+
+  xlab("Year")+ 
+  ylab("Bottom Temperature")+ 
+  theme
+
+```
+
+
+# Fishing mortality & TSB
+```{r}
+
+# FishingM ~ Year
+cpue.year %>% 
+  ggplot(aes(y = Fishing_Mortality,
+             x = Year))+
+           geom_point()+
+  facet_wrap(~Species, scales = "free")+
+  geom_smooth(method='loess', formula= y~x)+
+  xlab("Year")+ 
+  ggtitle("")+ 
+  theme
+
+
+# Mean age ~ Year
+cpue.year %>% 
+  ggplot(aes(y = Mean_age_10Length,
+             x = Year))+
+           geom_point()+
+  facet_wrap(~Species, scales = "free")+
+  geom_smooth(method='loess', formula= y~x)+
+  xlab("Year")+ 
+  ggtitle("")+ 
+  theme
+
+# Mean age ~ FishingM
+cpue.year %>% 
+  ggplot(aes(y = Mean_age_10Length,
+             x = Fishing_Mortality))+
+           geom_point()+
+  facet_wrap(~Species, scales = "free")+
+  geom_smooth(method='lm', formula= y~x)+
+  xlab("")+ 
+  ggtitle("")+ 
+  theme
+
+m1 <- lm(cpue.year$Mean_age_10Length ~ cpue.year$Fishing_Mortality)
+anova(m1)
+summary(m1)
+
+# habitat overlap~ fishing M/TSB
+cpue.year %>% 
+  ggplot(aes(y = Paired_habitat_overlap,
+             x = Fishing_Mortality))+
+           geom_point()+
+  facet_wrap(~Species, scales = "free")+
+  geom_smooth(method='lm', formula= y~x)+
+  ggtitle("")+ 
+  theme
+
+cpue.year %>% 
+  ggplot(aes(y = Paired_habitat_overlap,
+             x = TSB_Tonnes))+
+           geom_point()+
+  facet_wrap(~Species, scales = "free")+
+  geom_smooth(method='lm', formula= y~x)+
+  ggtitle("")+ 
+  theme
+
+```
+
+
+
+
+# Model habitat area & COG~ temp*length + TSB*length
+Used Temperature value from MeanBT (Wang2020) 
+Next: trim to parsimonious model
+
+```{r}
+# These model examine whether effects of temperature & fishing on distribution shift depends on length (interactive effects of temperature and length)
+
+# Function to model all species and lon/lat
+mod_lon <- function(species){
+  cog.species <- cpue.length.year %>% 
+  filter(Species == species) %>% 
+  mutate_at("Length", as.factor) 
+  
+  model <- lmer(Centroid_lon ~
+             Length * MeanBT_scale+
+             Length * TSB_Tonnes_scale
+           + (1|Year), 
+           data = cog.species)
+  #anova(model)
+  model
+}
+
+mod_lat <- function(species){
+  cog.species <- cpue.length.year %>% 
+  filter(Species == species) %>% 
+  mutate_at("Length", as.factor) 
+  
+  model <- lmer(Centroid_lat ~
+             Length * MeanBT_scale+
+             Length * TSB_Tonnes_scale
+           + (1|Year), 
+           data = cog.species)
+  anova(model)
+}
+
+mod_habitat_prop <- function(species){
+  cog.species <- cpue.length.year %>% 
+  filter(Species == species) %>% 
+  mutate_at("Length", as.factor) %>% 
+    mutate_at("Prop_SubArea_Length", as.numeric)
+  
+  model <- lmer(Prop_SubArea_Length ~
+             Length * MeanBT_scale+
+             Length * TSB_Tonnes_scale
+           + (1|Year), 
+           data = cog.species)
+  anova(model)
+}
+
+mod_habitat_Num <- function(species){
+  cog.species <- cpue.length.year %>% 
+  filter(Species == species) %>% 
+  mutate_at("Length", as.factor) %>% 
+    mutate_at("Num_SubArea_Length", as.numeric)
+  
+  model <- lmer(Num_SubArea_Length ~
+             Length * MeanBT_scale+
+             Length * TSB_Tonnes_scale
+           + (1|Year), 
+           data = cog.species)
+  anova(model)
+}
+
+mod_lon("Atlantic cod")
+mod_lat("Atlantic cod")
+mod_habitat_prop("Atlantic cod")
+mod_habitat_Num("Atlantic cod")
+
+mod_lon("Haddock")
+mod_lat("Haddock")
+mod_habitat_prop("Haddock")
+mod_habitat_Num("Haddock")
+
+mod_lon("Whiting")
+mod_lat("Whiting")
+mod_habitat_prop("Whiting")
+mod_habitat_Num("Whiting")
+
+
+```
+
+# Parsimonious model of previous chunk
+```{r}
+
+#-------------- 1. Cod subset 
+cpue.length.year.cod <- cpue.length.year %>% 
+  mutate_at("Length", as.factor) %>% 
+  filter(Species == "Atlantic cod")
+  
+# lon
+m1<-lmer(Centroid_lon ~Length * MeanBT_scale+
+       Length * TSB_Tonnes_scale
+           + (1|Year), data = cpue.length.year.cod)
+
+anova(m1)
+m2<- update(m1,~.- TSB_Tonnes_scale)
+anova(m2)
+m3<-update(m2,~.- MeanBT_scale)
+anova(m3)
+m4<-update(m3,~.- Length:MeanBT_scale)
+anova(m4)
+summary(m4)
+(summary(m4))["coefficients"][[1]]
+
+
+# lat
+m1<-lmer(Centroid_lat ~Length * MeanBT_scale+
+       Length * TSB_Tonnes_scale
+           + (1|Year), data = cpue.length.year.cod)
+
+anova(m1)
+m2<- update(m1,~.-MeanBT_scale)
+anova(m2)
+m3<-update(m2,~.-Length:MeanBT_scale)
+anova(m3)
+anova(m2,m3)
+summary(m3)
+
+# Prop_subarea
+m1<-lmer( Prop_SubArea_Length ~ Length * MeanBT_scale+
+       Length * TSB_Tonnes_scale
+           + (1|Year), data = cpue.length.year.cod)
+
+anova(m1)
+m2<- update(m1,~.- Length:MeanBT_scale)
+anova(m2)
+m3<-update(m2,~.- MeanBT_scale)
+anova(m3)
+summary(m3)
+
+
+
+#-------- 2. Haddock subset 
+cpue.length.year.haddock <- cpue.length.year %>% 
+  mutate_at("Length", as.factor) %>% 
+  filter(Species == "Haddock")
+  
+# lon
+m1<-lmer(Centroid_lon ~Length * MeanBT_scale+
+       Length * TSB_Tonnes_scale
+           + (1|Year), data = cpue.length.year.haddock)
+
+anova(m1)
+m2<- update(m1,~.- TSB_Tonnes_scale)
+anova(m2)
+m3<-update(m2,~.- Length:TSB_Tonnes_scale)
+anova(m3)
+m4<-update(m3,~.- Length:MeanBT_scale)
+anova(m4)
+summary(m4)
+(summary(m4))["coefficients"][[1]]
+
+
+# lat
+m1<-lmer(Centroid_lat ~Length * MeanBT_scale+
+       Length * TSB_Tonnes_scale
+           + (1|Year), data = cpue.length.year.haddock)
+
+anova(m1)
+m2<- update(m1,~.- TSB_Tonnes_scale)
+anova(m2)
+m3<-update(m2,~.- Length:TSB_Tonnes_scale)
+anova(m3)
+AIC(m2)
+AIC(m3)
+summary(m3)
+m4<-update(m3,~.- Length:MeanBT_scale)
+summary(m4)
+AIC(m4)
+
+# Prop_subarea
+m1<-lmer( Prop_SubArea_Length ~ Length * MeanBT_scale+
+       Length * TSB_Tonnes_scale
+           + (1|Year), data = cpue.length.year.haddock)
+
+anova(m1)
+m2<- update(m1,~.- Length:MeanBT_scale)
+anova(m2)
+m3<-update(m2,~.- MeanBT_scale)
+anova(m3)
+summary(m3)
+
+
+
+
+
+
+#-------- 3. Whiting subset 
+cpue.length.year.whiting <- cpue.length.year %>% 
+  mutate_at("Length", as.factor) %>% 
+  filter(Species == "Whiting")
+  
+# lon
+m1<-lmer(Centroid_lon ~Length * MeanBT_scale+
+       Length * TSB_Tonnes_scale
+           + (1|Year), data = cpue.length.year.whiting)
+
+anova(m1)
+m2<- update(m1,~.- MeanBT_scale)
+anova(m2)
+m3<-update(m2,~.- TSB_Tonnes_scale)
+anova(m3)
+m4<-update(m3,~.- Length:TSB_Tonnes_scale)
+anova(m4)
+summary(m4)
+
+
+
+# lat
+m1<-lmer(Centroid_lat ~Length * MeanBT_scale+
+       Length * TSB_Tonnes_scale
+           + (1|Year), data = cpue.length.year.whiting)
+
+anova(m1)
+m2<- update(m1,~.- Length:MeanBT_scale )
+anova(m2)
+m3<-update(m2,~.- MeanBT_scale )
+anova(m3)
+m4<-update(m3,~.- TSB_Tonnes_scale)
+anova(m4)
+summary(m4)
+
+
+# Prop_subarea
+m1<-lmer( Prop_SubArea_Length ~ Length * MeanBT_scale+
+       Length * TSB_Tonnes_scale
+           + (1|Year), data = cpue.length.year.whiting)
+
+anova(m1)
+m2<- update(m1,~.- MeanBT_scale)
+anova(m2)
+m3<-update(m2,~.- Length:MeanBT_scale )
+anova(m3)
+summary(m3)
+
+```
+
+
+# Model overlap & distance & prop_habitat ~ Fishing+temp 
+## Length or pair_id as fixed
+```{r}
+# Lon distance Wang 2020
+mod_lon_distance_Wang <- function(species){
+  cog.species <- cpue.pair %>% 
+  filter(Species == species) 
+  
+  model <- lmer(Distance_lon ~
+             Pair_id * MeanBT_scale+
+             Pair_id * TSB_Tonnes_scale+
+               (1|Year),
+           data = cog.species)
+  
+  anova(model)
+}
+
+
+
+# Lat distance Wang2020
+mod_lat_distance_Wang <- function(species){
+  cog.species <- cpue.pair %>% 
+  filter(Species == species)
+  
+  model <- lmer(Distance_lat ~
+             Pair_id * MeanBT_scale+
+             Pair_id * TSB_Tonnes_scale+
+               (1|Year),
+           data = cog.species)
+  
+  anova(model)
+}
+
+# Lat distance Tu 2018
+mod_lat_distance_Tu <- function(species){
+  cog.species <- cpue.pair %>% 
+  filter(Species == species)
+  
+  model <- lmer(Distance_lat ~
+             Pair_id * MeanBT_Tu2018_scale+
+             Pair_id * TSB_Tonnes_scale+
+               (1|Year),
+           data = cog.species)
+  
+  anova(model)
+}
+
+# Prop_habitat Wang 2020
+mod_prop_subarea_Wang <- function(species){
+  cog.species <- cpue.length.year %>% 
+  filter(Species == species)
+  
+  model <- lmer(Prop_SubArea_Length ~
+             Length * MeanBT_scale+
+             Length * TSB_Tonnes_scale+
+               (1|YearQua),
+           data = cog.species)
+  
+  anova(model)
+}
+
+# Prop_habitat Tu 2018
+mod_prop_subarea_Tu <- function(species){
+  cog.species <- cpue.length.year %>% 
+  filter(Species == species)
+  
+  model <- lmer(Prop_SubArea_Length ~
+             Length * MeanBT_Tu2018_scale+
+             Length * TSB_Tonnes_scale+
+               (1|YearQua),
+           data = cog.species)
+  
+  anova(model)
+}
+
+lon1.w <- mod_lon_distance_Wang("Atlantic cod")
+lon2.w <- mod_lon_distance_Wang("Haddock")
+lon3.w <- mod_lon_distance_Wang("Whiting")
+
+lat1.w <- mod_lat_distance_Wang("Atlantic cod")
+lat2.w <- mod_lat_distance_Wang("Haddock")
+lat3.w <- mod_lat_distance_Wang("Whiting")
+
+pro1.w <- mod_prop_subarea_Wang("Atlantic cod")
+pro2.w <- mod_prop_subarea_Wang("Haddock")
+pro3.w <- mod_prop_subarea_Wang("Whiting")
+
+lon1.w
+lon2.w
+lon3.w
+lat1.w
+lat2.w
+lat3.w
+pro1.w
+pro2.w
+pro3.w
+
+```
+
+
+# Parsimonious model of previous chunk
+```{r eval=FALSE}
+
+m.lon.cod <-mod_lon_distance ("Atlantic cod")
+anova(m.lon.cod)
+m.lon.cod.1 <- update (m.lon.cod,~.- Pair_id:MeanBT_scale )
+anova(m.lon.cod.1)
+anova(m.lon.cod, m.lon.cod.3)
+m.lon.cod.2 <- update (m.lon.cod.1,~.- TSB_Tonnes_scale)
+anova(m.lon.cod.2)
+m.lon.cod.3 <- update (m.lon.cod.2,~.- MeanBT_scale)
+anova(m.lon.cod.3) # final model
+AIC(m.lon.cod, m.lon.cod.1, m.lon.cod.2, m.lon.cod.3)
+s1 <- (summary(m.lon.cod.3))["coefficients"][[1]]
+```
+
+
+# Model overlap & distance & prop_habitat ~ Fishing+temp 
+## Length or pair_id as random
+```{r}
+mod_lon_distance_r <- function(species){
+  cog.species <- cpue.pair %>% 
+  filter(Species == species) 
+  
+  model <- lmer(Distance_lon ~
+             MeanBT_scale+
+             TSB_Tonnes_scale+
+               (1|Year)+ (1|Pair_id),
+           data = cog.species)
+  
+  summary(model)
+}
+
+mod_lat_distance_r <- function(species){
+  cog.species <- cpue.pair %>% 
+  filter(Species == species) 
+  
+  model <- lmer(Distance_lat ~
+            MeanBT_scale+
+             TSB_Tonnes_scale+
+               (1|Year) + (1|Pair_id),
+           data = cog.species)
+  
+  summary(model)
+}
+
+mod_prop_subarea_r <- function(species){
+  cog.species <- cpue.length.year %>% 
+  filter(Species == species)
+  
+  model <- lmer(Prop_SubArea_Length ~
+              MeanBT_scale+
+             TSB_Tonnes_scale+
+               (1|YearQua) + (1|Length),
+           data = cog.species)
+  
+  summary(model)
+}
+
+
+mod_lon_distance_r("Atlantic cod")
+mod_lon_distance_r("Haddock")
+mod_lon_distance_r("Whiting")
+
+mod_lat_distance_r("Atlantic cod")
+mod_lat_distance_r("Haddock")
+mod_lat_distance_r("Whiting")
+
+mod_prop_subarea_r("Atlantic cod")
+mod_prop_subarea_r("Haddock")
+mod_prop_subarea_r("Whiting")
+
+
+```
+
+
