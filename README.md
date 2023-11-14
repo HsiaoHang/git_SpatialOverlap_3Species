@@ -1,1 +1,1 @@
-This code reproduces all figures and tables in the manuscript: Hsiao-Hang Tao et al (in revision) Exploring mechanisms of spatial segregation between body size groups within fish populations under environmental change.
+This script reproduces all figures in the manuscript: Tao et al 2023 Exploring mechanisms of spatial segregation between body size groups within fish populations under environmental change. doi: 10.1111/ecog.06730 
