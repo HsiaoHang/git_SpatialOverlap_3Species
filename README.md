@@ -4,7 +4,7 @@ Data and code to calculate within-population spatial overlap in Tao et al. 2023.
 
 `data/NS_stn_1965_2000.csv` and `data/NS_stn_2001_2020.csv` are raw CPUE data downloaded from the ICES data portal <https://data.ices.dk>.
 
-`data/total_stock_biomass.csv` are total stock biomass data compiled from two ICES stock assessment reports (ICES 2021, 2023).
+`data/total_stock_biomass.csv` is total stock biomass data compiled from two ICES stock assessment reports (ICES 2021, 2023).
 
 `data/bottomT_NS_1977_2019.csv` is sea bottom temperature compiled from yearly raw CTD and Bottle Data, downloaded from the ICES data portal <https://data.ices.dk>. Raw data and codes for compilation can be requested to the author.
 
